@@ -1,0 +1,747 @@
+---
+title: "Kim et al COVID-19 sterile transcript analysis"
+output:
+  html_notebook:
+    df_print: paged
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE, fig.path = "Kim_Covid_GLT_figures/",
+                      dev = "svg")
+library(Seurat)
+library(sciCSR)
+library(plyr)
+reticulate::use_condaenv("scicsr", required = TRUE)
+```
+
+Analysis of Kim et al data. We considered here samples 368-07 and 368-20.
+
+# scBCR-seq data
+
+```{r}
+brep_heavy <- c('WU368_kim_et_al_nature_2022_bcr_heavy_368-07.tsv',
+                'WU368_kim_et_al_nature_2022_bcr_heavy_368-20.tsv')
+brep_heavy <- lapply(brep_heavy, read.table, stringsAsFactors = FALSE, 
+                     sep = "\t", header = TRUE)
+
+common_cols <- colnames(brep_heavy[[1]])[which(colnames(brep_heavy[[1]]) %in% colnames(brep_heavy[[2]]))]
+brep_heavy[[1]] <- brep_heavy[[1]][, common_cols]
+brep_heavy[[2]] <- brep_heavy[[2]][, common_cols]
+brep_heavy <- do.call("rbind", brep_heavy)
+brep_heavy$timepoint <- factor(brep_heavy$timepoint,
+                               levels = c("d28", "d60", "d110", "d201"))
+
+library(plyr)
+brep_count <- ddply(brep_heavy, c("donor", "timepoint", "gex_anno", "subisotype"),
+                    nrow)
+brep_count <- merge(brep_count,
+                    ddply(brep_heavy, c("donor", "timepoint", "gex_anno"), nrow),
+                    by = c("donor", "timepoint", "gex_anno"))
+brep_count$prop <- brep_count$V1.x / brep_count$V1.y
+brep_count$subisotype <- factor(brep_count$subisotype,
+                                levels = c("IGHM", "IGHD", "IGHG3", "IGHG1", "IGHA1",
+                                           "IGHG2", "IGHG4", "IGHE", "IGHA2"),
+                                labels = c("M", "D", "G3", "G1", "A1", "G2", "G4",
+                                           "E", "A2"))
+brep_count <- brep_count[which(!is.na(brep_count$subisotype) &
+                                 !is.na(brep_count$gex_anno)), ]
+library(ggplot2)
+ggplot(brep_count, aes(x = timepoint, y = subisotype, fill = prop)) +
+  geom_tile() + scale_fill_gradient2() + cowplot::theme_cowplot() +
+  facet_grid(donor ~ gex_anno) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+ 
+```{r}
+svg("Kim_donor07_GC_BCR_barplot.svg", width = 6.5, height = 3.5)
+ggplot(brep_count[which(brep_count$gex_anno == "GC" & brep_count$donor == "368-07"), ],
+       aes(x = prop, y = subisotype)) + geom_bar(stat = "identity", fill = "#00BFC4") +
+  facet_wrap(~ timepoint) + 
+  scale_x_continuous(labels = scales::percent, name = "% BCR") +
+  scale_y_discrete(drop = FALSE, name = "") +
+  cowplot::theme_cowplot()
+dev.off()
+```
+
+# scRNA-seq
+
+Python AnnData object made available on Zenodo - 
+
+```{python, eval=FALSE}
+adata = sc.read('WU368_kim_et_al_nature_2022_gex_b_cells.h5ad')
+adata.X = adata.layers['raw_counts']
+adata.uns = dict()
+adata_subset = adata[adata.obs['donor'] == '368-07']
+adata_subset.write_h5ad('WU368_kim_et_al_nature_2022_gex_b_cells_368-07.h5ad')
+adata_subset.obs[['cell_id', 'anno_leiden_0.18', 'sample']].to_csv('WU368_kim_et_al_nature_2022_gex_b_cells_368-07_celltype.csv')
+adata_subset = adata[adata.obs['donor'] == '368-20']
+adata_subset.write_h5ad('WU368_kim_et_al_nature_2022_gex_b_cells_368-20.h5ad')
+adata_subset.obs[['cell_id', 'anno_leiden_0.18', 'sample']].to_csv('WU368_kim_et_al_nature_2022_gex_b_cells_368-20_celltype.csv')
+
+```
+
+# count IgH JC/IC molecules
+
+```{r eval=FALSE}
+# get list of B cells per sample. Fetch cell barcodes and celltype mapping
+# from the AnnData object in python
+# Here read that in and generate separate lists for each sample
+cell_barcodes <- 'WU368_kim_et_al_nature_2022_gex_b_cells_368-07_celltype.csv'
+cell_barcodes <- read.csv(cell_barcodes, stringsAsFactors = FALSE)
+cell_barcodes <- split(cell_barcodes, f=  cell_barcodes$sample)
+for(f in names(cell_barcodes)){
+  write.table(cell_barcodes[[f]][, "cellbc", drop = FALSE], paste0("WU368_kim_et_al_nature_2022_gex_b_cells_368-07_", f, "_barcodes.csv"),
+              col.names = FALSE, row.names = FALSE, quote = FALSE)
+}
+
+# same for donor 20
+cell_barcodes <- 'WU368_kim_et_al_nature_2022_gex_b_cells_368-20_celltype.csv'
+cell_barcodes <- read.csv(cell_barcodes, stringsAsFactors = FALSE)
+cell_barcodes <- split(cell_barcodes, f=  cell_barcodes$sample)
+for(f in names(cell_barcodes)){
+  write.table(cell_barcodes[[f]][, "cellbc", drop = FALSE], paste0("WU368_kim_et_al_nature_2022_gex_b_cells_368-20_", f, "_barcodes.csv"),
+              col.names = FALSE, row.names = FALSE, quote = FALSE)
+}
+
+```
+
+Convert the anndata objects into Seurat objects.
+
+```{r, eval=FALSE}
+library(SeuratDisk)
+Convert("WU368_kim_et_al_nature_2022_gex_b_cells_368-07.h5ad", dest = "h5Seurat",
+        overwrite = TRUE)
+Convert("WU368_kim_et_al_nature_2022_gex_b_cells_368-20.h5ad", dest = "h5Seurat",
+        overwrite = TRUE)
+kim <- list(LoadH5Seurat("WU368_kim_et_al_nature_2022_gex_b_cells_368-07.h5seurat"),
+            LoadH5Seurat("WU368_kim_et_al_nature_2022_gex_b_cells_368-20.h5seurat"))
+dim_reduc <- list("pca" = merge(kim[[1]]@reductions$pca, kim[[2]]@reductions$pca),
+                  "umap" = merge(kim[[1]]@reductions$umap, kim[[2]]@reductions$umap))
+kim <- merge(kim[[1]], kim[[2]], add.cell.ids = c("368-07", "368-20"), 
+             merge.data = FALSE, 
+             project = "KimEtAl_Covid")
+kim@reductions <- dim_reduc
+kim@assays$RNA@data <- kim@assays$log_norm@counts
+kim@assays$RNA@scale.data <- as.matrix(kim@assays$scaled@counts)
+kim[["log_norm"]] <- NULL
+kim[["raw_counts"]] <- NULL
+kim[["scaled"]] <- NULL
+gc()
+Idents(kim) <- kim[["anno_leiden_0.18"]]
+kim <- RenameCells(kim, new.names = kim[["cell_id"]][, 1])
+DimPlot(kim)
+FeaturePlot(kim, c("MS4A1", "TCL1A", "AICDA", "CD38"))
+```
+
+```{r, eval=FALSE}
+saveRDS(kim, "WU368_kim_et_al_nature_2022_gex_b_cells.rds")
+```
+
+```{r, eval=FALSE}
+directory <- '/media/josephn/disk2/KimEtAl_Covid'
+bamfiles <- list.files(path = directory,
+                       pattern = 'bcells.bam$', full.names = TRUE,
+                       recursive = TRUE)
+bamfiles <- bamfiles[grepl("d110|d60", bamfiles)]
+
+data("human_definitions")
+
+# map between the sample ID (eg s123) to a string detailing which donor & timepoint & sample it is
+mapping <- c("covax07_d28" = "s7", "covax07_d60_1" = "s29", "covax07_d60_2" = "s30",
+             "covax07_d110_1" = "s31", "covax07_d110_2" = "s32", 
+             "covax07_d201_1" = "s70", "covax07_d201_2" = "s71",
+             "covax20_d28" = "s4", "covax20_d60_1" = "s25", "covax20_d60_2" = "s26",
+             "covax20_d110_1" = "s27", "covax20_d110_2" = "s28", 
+             "covax20_d201_1" = "s75", "covax20_d201_2" = "s76")
+
+library(sciCSR)
+kim_IGH <- lapply(bamfiles, function(bamfile){
+  cat(paste0(bamfile, " ...\n"))
+  out <- getIGHmapping(bamfile, human_definitions)
+  out2 <- getIGHreadType(out$read_count)
+  out3 <- summariseIGHreads(out2, human_definitions)
+  # formatting cell barcode
+  sample_name <- unlist(strsplit(dirname(bamfile), split = "/"))
+  sample_name <- sample_name[length(sample_name)]
+  donor <- gsub("covax", "368-", unlist(strsplit(sample_name, split = "_"))[1])
+  sample_name <- mapping[gsub("368-[0-9][0-9]_", "", sample_name)]
+  rownames( out3 ) <- paste0(donor, "_", sample_name, "@", rownames( out3 ))
+  out3
+})
+kim_IGH <- do.call("rbind", kim_IGH)
+saveRDS(kim_IGH, "Kim_Covid_IGHC.rds")
+```
+
+```{r, eval=FALSE}
+kim_IGH <- readRDS("Kim_Covid_IGHC.rds")
+kim_IGH <- kim_IGH[ which( rownames(kim_IGH) %in% kim$cell_id ), ] # only cells surviving in the dataset
+kim <- mergeIgHCountsToSeurat(kim_IGH, kim, assay_name = "IGHC")
+kim <- NormalizeData( kim, assay = "IGHC" )
+saveRDS(kim, "WU368_kim_et_al_nature_2022_gex_b_cells_IGHC.rds")
+
+```
+
+### Visualise productive/sterile transcription level as dot plots
+
+```{r, fig.width=12, fig.height=8}
+kim <- readRDS("WU368_kim_et_al_nature_2022_gex_b_cells_IGHC.rds")
+
+mapping <- c("covax07_d28" = "s7", "covax07_d60_1" = "s29", "covax07_d60_2" = "s30",
+             "covax07_d110_1" = "s31", "covax07_d110_2" = "s32", 
+             "covax07_d201_1" = "s70", "covax07_d201_2" = "s71",
+             "covax20_d28" = "s4", "covax20_d60_1" = "s25", "covax20_d60_2" = "s26",
+             "covax20_d110_1" = "s27", "covax20_d110_2" = "s28", 
+             "covax20_d201_1" = "s75", "covax20_d201_2" = "s76")
+
+tp <- FetchData(kim, "sample")
+tp$timepoint <- sapply(tp$sample, function(x){
+  unlist(strsplit(names(mapping)[which(mapping == x)], split = "_"))[2]
+})
+tp$timepoint <- factor(tp$timepoint, levels = c("d28", "d60", "d110", "d201"))
+kim <- AddMetaData(kim, metadata = tp[, "timepoint", drop = FALSE])
+kim_tp <- list(
+  subset(kim, subset = (timepoint == "d28")),
+  subset(kim, subset = (timepoint == "d60")),
+  subset(kim, subset = (timepoint == "d110")),
+  subset(kim, subset = (timepoint == "d201"))
+)
+
+plotIGHC <- function(SeuratObj, assay = "IGHC", features = rownames( kim@assays$IGHC@counts ))
+{
+library(ggplot2)
+  cowplot::plot_grid(
+    DotPlot(SeuratObj, assay = "IGHC", 
+            features = features[ grepl("P$", features)]) + ggtitle("Productive") +
+      theme(legend.position = "none") + coord_flip() + RotatedAxis(),
+    DotPlot(SeuratObj, assay = "IGHC", 
+            features = features[ grepl("S$", features)]) + ggtitle("Sterile") +
+      theme(legend.position = "bottom") + coord_flip() + RotatedAxis(),
+    DotPlot(SeuratObj, assay = "IGHC", 
+            features = features[ grepl("-C$", features)]) + ggtitle("C only") +
+      theme(legend.position = "none") + coord_flip() + RotatedAxis(),
+    nrow = 1, axis = "tb", align = "h"
+  )  
+}
+
+cowplot::plot_grid(
+  plotIGHC(kim_tp[[2]]), plotIGHC(kim_tp[[3]]), 
+  nrow = 2, align = "v", axis = "lr"
+)
+```
+
+```{r}
+# merge vdj into Seurat object
+vdj <- brep_heavy[, c("cell_id", "v_call", "d_call", "j_call", "subisotype", 
+                      "productive", "v_identity", "junction", "junction_aa", "clone_id",
+                      "s_pos_clone")]
+rownames(vdj) <- vdj[, "cell_id"]
+kim <- AddMetaData(kim, metadata = vdj[, -1])
+
+```
+
+```{r}
+kim <- AddMetaData(kim, tp$timepoint, "timepoint")
+svg("Kim_Covid_GLT_figures/umaps.svg", width = 6.2, height = 6.4)
+cowplot::plot_grid(
+  DimPlot(subset(kim, subset = (anno_leiden_0.18 == "GC" & donor == "368-07")), 
+          group.by = "subisotype", split.by = c("timepoint"), 
+          cols = c("grey", "#b7db90", "#309f2b", "#1e76ba", "#f99b97",
+                   "#de191d", "#fdbe6d", "#a5cee2", "grey")),
+  DimPlot(subset(kim, subset = (anno_leiden_0.18 == "GC" & donor == "368-20")), 
+          group.by = "subisotype", split.by = c("timepoint"), 
+          cols = c("grey", "#b7db90", "#1e76ba", "#f99b97",
+                   "#de191d", "#fdbe6d", "#fe7f01", "#a5cee2", "grey")),
+  axis = "lr", align = "v", ncol = 1
+)
+dev.off()
+```
+
+# fit transition models with CSR/SHM
+
+```{r}
+
+kim <- FindNeighbors(kim)
+kim <- getCSRpotential(kim, c_gene_anno_name = "subisotype", 
+                       vars.to.regress = "n_umi",
+                       reference_based = "human",
+                       isotype_column_to_add = "IGH_c_gene")
+# get SHM frequency (= 1 - IGH_v_identity)
+kim <- getSHM(kim, v_identity_anno_name = "v_identity")
+kim@assays$RNA@scale.data <- matrix()
+convertSeuratToH5ad(subset(kim, subset = (anno_leiden_0.18 == "GC" & donor == "368-07" & timepoint %in% c("d60", "d110"))),
+                    assays = c("RNA"),
+                    "WU368_kim_et_al_nature_2022_gex_b_cells_368-07_GC_IGHC.h5ad")
+convertSeuratToH5ad(subset(kim, subset = (anno_leiden_0.18 == "GC" & donor == "368-20" & timepoint %in% c("d60", "d110"))),
+                    assays = c("RNA"),
+                    "WU368_kim_et_al_nature_2022_gex_b_cells_368-20_GC_IGHC.h5ad")
+
+# split data by timepoint
+splitAnnData(
+  anndata_file = "WU368_kim_et_al_nature_2022_gex_b_cells_368-07_GC_IGHC_assay-RNA.h5ad",
+  split.by = "timepoint", levels = c("d60", "d110"), conda_env = "scverse"
+)
+splitAnnData(
+  anndata_file = "WU368_kim_et_al_nature_2022_gex_b_cells_368-20_GC_IGHC_assay-RNA.h5ad",
+  split.by = "timepoint", levels = c("d60", "d110"), conda_env = "scverse"
+)
+
+# fit transitions based on csr, group cells by isotype
+csr <- apply(data.frame(donor = c("368-07", "368-07", "368-20", "368-20"), 
+                        timepoint = c("d60", "d110", "d60", "d110"),
+                        stringsAsFactors = FALSE), MARGIN = 1, function(x){
+  timepoint <- as.character(x[2]); donor <- as.character(x[1])                        
+  filename <- paste0("WU368_kim_et_al_nature_2022_gex_b_cells_", donor,
+                     "_GC_IGHC_assay-RNA_", timepoint, ".h5ad")
+  g_csr <- fitTransitionModel(
+    anndata_file = filename, conda_env = "scicsr", mode = "pseudotime", 
+    pseudotime_key = "csr_pot", do_pca = FALSE
+  )
+  tpt_csr <- fitTPT(
+    anndata_file = filename, 
+    conda_env = "scicsr", CellrankObj = g_csr, group.cells.by = "IGH_c_gene",
+    source_state = 'M', target_state = 'G4'
+  )
+  return(list("transition_matrix" = g_csr, "tpt" = tpt_csr))
+})
+names(csr) <- c("368-07_d60", "368-07_d110", "368-20_d60", "368-20_d110")
+saveRDS(csr, "csr_isotype_gc.rds")
+```
+
+```{r, fig.width=7, fig.height=10}
+csr <- readRDS('csr_isotype_gc.rds')
+cowplot::plot_grid(
+  cowplot::plot_grid(plotFluxMatrix(csr[[1]]$tpt, kim_tp[[2]]) + ggtitle("368-07, d60"),
+                     plotStationaryDistribution(csr[[1]]$tpt, kim_tp[[2]]), ncol = 1,
+                     align = "v", axis = "lr"),
+  cowplot::plot_grid(plotFluxMatrix(csr[[2]]$tpt, kim_tp[[3]]) + ggtitle("368-07, d110"),
+                     plotStationaryDistribution(csr[[2]]$tpt, kim_tp[[3]]), ncol = 1,
+                     align = "v", axis = "lr"),
+  cowplot::plot_grid(plotFluxMatrix(csr[[3]]$tpt, kim_tp[[2]]) + ggtitle("368-20, d60"),
+                     plotStationaryDistribution(csr[[3]]$tpt, kim_tp[[2]]), ncol = 1,
+                     align = "v", axis = "lr"),
+  cowplot::plot_grid(plotFluxMatrix(csr[[4]]$tpt, kim_tp[[3]]) + ggtitle("368-20, d110"),
+                     plotStationaryDistribution(csr[[4]]$tpt, kim_tp[[3]]), ncol = 1,
+                     align = "v", axis = "lr"),
+  nrow = 2
+)
+
+```
+
+Check whether predictions from TPT match repertoire data from a subsequent timepoint:
+
+* predict from d60 $\rightarrow$ validate using repertoire from d110
+* predict from d110 $\rightarrow$ validate using repertoire from d201
+
+```{r}
+predictions <- lapply(csr, function(x) {
+  isotypes <- c("M", "G3", "G1", "A1", "G2", "G4", "E", "A2")
+  y <- x$tpt$gross_flux
+  isotypes <- isotypes[which(isotypes %in% rownames(y))]
+  y <- y[isotypes, isotypes]
+  y[lower.tri(y)] <- 0
+  y <- colSums(y)
+  data.frame(flux_in = y / sum(y),
+             subisotype = names(y))
+})
+predictions[[1]]$timepoint <- "d110"
+predictions[[2]]$timepoint <- "d201"
+predictions[[3]]$timepoint <- "d110"
+predictions[[4]]$timepoint <- "d201"
+predictions[[1]]$donor <- "368-07"
+predictions[[2]]$donor <- "368-07"
+predictions[[3]]$donor <- "368-20"
+predictions[[4]]$donor <- "368-20"
+predictions <- do.call("rbind", predictions)
+
+preds <- merge(brep_count, predictions, by = c("donor", "timepoint", "subisotype"),
+               all = TRUE)
+preds <- preds[which(preds$timepoint %in% c("d110", "d201")), ]
+preds[which(is.na(preds$flux_in)), "flux_in"] <- 0
+preds[which(is.na(preds$gex_anno)), "gex_anno"] <- "GC"
+preds <- preds[which(preds$gex_anno == "GC"), ]
+preds[which(is.na(preds$prop)), "prop"] <- 0
+ddply(preds, c("donor", "timepoint"), summarise,
+      cosine = philentropy::cosine_dist(flux_in, prop, testNA = FALSE),
+      jsd = philentropy::jensen_shannon(flux_in, prop, testNA = FALSE, unit = "log2"),
+      spearman = cor(flux_in, prop, method = "spearman"))
+```
+
+Side by side comparison of the predicted vs observed (& at future timepoint) isotype distribution
+
+```{r}
+preds <- reshape2::melt(preds, id.vars = c("donor", "timepoint", "subisotype"),
+                        measure.vars = c("flux_in", "prop"))
+preds$subisotype <- factor(preds$subisotype, levels = c("M", "G3", "G1",
+                                                        "A1", "G2", "G4", "E", "A2"))
+preds$variable <- factor(preds$variable, 
+                         labels = c("TPT total inward flux", "repertoire"))
+svg("Kim_side-by-side_pred-and-repertoire.svg", width = 7, height = 4.4)
+ggplot(preds, aes(y = subisotype, x = value, fill = variable)) + 
+  geom_bar(stat = "identity", position = position_dodge()) + 
+  scale_y_discrete(name = "", na.translate = FALSE, drop = FALSE) +
+  scale_x_continuous(name = "%", labels = function(x) 100*x) +
+  facet_grid(donor ~ timepoint + variable) + cowplot::theme_cowplot()
+dev.off()
+```
+
+```{r, fig.width = 14, fig.height = 7}
+plotFluxWithRepertoire <- function(tb)
+{
+  # just wrapping around the ggplot plotting command above
+  ggplot(tb, aes(y = subisotype, x = value, fill = variable)) + 
+    geom_bar(stat = "identity", position = position_dodge()) + 
+    scale_y_discrete(name = "", na.translate = FALSE, drop = FALSE) +
+    scale_x_continuous(name = "%", labels = function(x) 100*x) +
+    scale_fill_discrete(labels = c("TPT total\ninward flux", "repertoire"), name = "") +
+    facet_wrap(~ variable) + cowplot::theme_cowplot()
+}
+
+cowplot::plot_grid(
+  cowplot::plot_grid(plotFluxMatrix(csr[[3]]$tpt, kim_tp[[2]]) + ggtitle("368-20, d60") +
+                       theme(legend.position = "left"),
+                     plotFluxWithRepertoire(preds[preds$donor == "368-20" & preds$timepoint == "d110", ]), nrow = 1, rel_widths = c(2, 2.5),
+                     align = "h", axis = "tb"),
+  cowplot::plot_grid(plotFluxMatrix(csr[[4]]$tpt, kim_tp[[3]]) + ggtitle("368-20, d110") +
+                       theme(legend.position = "left"),
+                     plotFluxWithRepertoire(preds[preds$donor == "368-20" & preds$timepoint == "d201", ]), nrow = 1, rel_widths = c(2, 2.5),
+                     align = "h", axis = "tb"),
+  cowplot::plot_grid(plotFluxMatrix(csr[[1]]$tpt, kim_tp[[2]]) + ggtitle("368-07, d60") +
+                       theme(legend.position = "left"),
+                     plotFluxWithRepertoire(preds[preds$donor == "368-07" & preds$timepoint == "d110", ]), nrow = 1, rel_widths = c(2, 2.5),
+                     align = "h", axis = "tb"),
+  cowplot::plot_grid(plotFluxMatrix(csr[[2]]$tpt, kim_tp[[3]]) + ggtitle("368-07, d110") +
+                       theme(legend.position = "left"),
+                     plotFluxWithRepertoire(preds[preds$donor == "368-07" & preds$timepoint == "d201", ]), nrow = 1, rel_widths = c(2, 2.5),
+                     align = "h", axis = "tb"),
+  nrow = 2
+)
+
+```
+
+```{r, fig.width=16, fig.height=6}
+svg("Kim_Covid_GLT_figures/Kim_all_new.svg", width = 15, height = 6)
+cowplot::plot_grid(
+  cowplot::plot_grid(
+      ggplot(brep_count[brep_count$gex_anno == "GC" & brep_count$donor == "368-07", ], 
+             aes(x = prop, y = subisotype, fill = timepoint)) + ggtitle("\ndonor 07\n") +
+        geom_bar(stat = "identity", position = position_dodge2()) + 
+        cowplot::theme_cowplot() + scale_y_discrete(drop = FALSE) + 
+        scale_fill_manual(values = RColorBrewer::brewer.pal(9, "Blues")[c(4, 6, 8)]) +
+        scale_x_continuous(name = "%", labels = function(x) 100*x),
+      ggplot(brep_count[brep_count$gex_anno == "GC" & brep_count$donor == "368-20", ], 
+             aes(x = prop, y = subisotype, fill = timepoint)) + ggtitle("\ndonor 20\n") +
+        geom_bar(stat = "identity", position = position_dodge2()) + 
+        cowplot::theme_cowplot() + scale_y_discrete(drop = FALSE) + 
+        scale_fill_manual(values = RColorBrewer::brewer.pal(9, "Blues")[c(4, 6, 8)]) +
+        scale_x_continuous(name = "%", labels = function(x) 100*x),
+      ncol = 1
+  ),
+  cowplot::plot_grid(
+  cowplot::plot_grid(plotFluxMatrix(csr[[1]]$tpt, kim_tp[[2]]) + ggtitle("donor 07, w7") +
+                       theme(legend.position = "left") + scale_colour_gradient2(name = "% flux", limits =c(0, 25), oob = scales::squish),
+                     plotFluxWithRepertoire(preds[preds$donor == "368-07" & preds$timepoint == "d110", ]), nrow = 1, #rel_widths = c(3, 2.5),
+                     align = "h", axis = "tb"),
+  cowplot::plot_grid(plotFluxMatrix(csr[[2]]$tpt, kim_tp[[3]]) + ggtitle("donor 07, w15") +
+                       theme(legend.position = "left") + scale_colour_gradient2(name = "% flux", limits =c(0, 25), oob = scales::squish),
+                     plotFluxWithRepertoire(preds[preds$donor == "368-07" & preds$timepoint == "d201", ]), nrow = 1, #rel_widths = c(3, 2.5),
+                     align = "h", axis = "tb"),
+  cowplot::plot_grid(plotFluxMatrix(csr[[3]]$tpt, kim_tp[[2]]) + ggtitle("donor 20, w7") +
+                       theme(legend.position = "left") + scale_colour_gradient2(name = "% flux", limits =c(0, 25), oob = scales::squish),
+                     plotFluxWithRepertoire(preds[preds$donor == "368-20" & preds$timepoint == "d110", ]), nrow = 1, #rel_widths = c(3, 2.5),
+                     align = "h", axis = "tb"),
+  cowplot::plot_grid(plotFluxMatrix(csr[[4]]$tpt, kim_tp[[3]]) + ggtitle("donor 20, w15") +
+                       theme(legend.position = "left") + scale_colour_gradient2(name = "% flux", limits =c(0, 25), oob = scales::squish),
+                     plotFluxWithRepertoire(preds[preds$donor == "368-20" & preds$timepoint == "d201", ]), nrow = 1, #rel_widths = c(3, 2.5),
+                     align = "h", axis = "tb"),
+  nrow = 2
+),
+nrow = 1, rel_widths = c(1, 5.5), axis = "tb", align = "h"
+
+)
+dev.off()
+```
+
+Compare cosine similarities of repertoire w7 vs repertoire w15, repertoire w15 vs repertoire w29.
+
+```{r}
+rep_perc <- reshape2::dcast(brep_count[which(brep_count$donor %in% c("368-07", "368-20") &
+                                               brep_count$gex_anno == "GC"), ],  
+                            donor + subisotype ~ timepoint , value.var = "prop", fill = 0)
+ddply(rep_perc, c("donor"), summarise,
+      cosine_w7_w15 = philentropy::cosine_dist(d60, d110, testNA=FALSE),
+      cosine_w15_w29 = philentropy::cosine_dist(d110, d201, testNA=FALSE))
+```
+
+# effect of downsampling future states on inference
+
+```{r}
+downsampling_future_states <- function(SeuratObj, future_state_prop, seed = 123,
+                                       filename){
+  current_state <- names(which.max(table(SeuratObj$IGH_c_gene)))
+  current_state_idx <- which(levels(SeuratObj$IGH_c_gene) == current_state)
+  # find out how many cells need to be relabelled in order to downsample the future states
+  # i.e. (No. of cells with isotypes beyond the current state) - (Target No. of cells at current state)
+  target_no <- round(ncol(SeuratObj) * future_state_prop)
+  future_state_cells <- which(as.numeric(SeuratObj$IGH_c_gene) > current_state_idx)
+  no_to_flip <- length(future_state_cells) - target_no
+  set.seed(seed)
+  cells_to_flip <- sample(future_state_cells, size = no_to_flip)
+  # ensure that at least 1 cell exists as the target state (G4) by sampling another cell if
+  # any cell in the target state is in the cells_to_flip vector
+  target_state <- "G4"
+  cells_to_flip <- sapply(cells_to_flip, function(x){
+    if(SeuratObj$IGH_c_gene[x] == target_state){
+      allowed_cells <- future_state_cells[which(SeuratObj$IGH_c_gene[future_state_cells] != target_state)]
+      allowed_cells <- future_state_cells[which(! future_state_cells %in% cells_to_flip)]
+      return(sample(allowed_cells, 1))
+    } else return(x)
+  })
+  SeuratObj$IGH_c_gene[cells_to_flip] <- current_state
+  # now write this out as .h5ad
+  filename <- paste0(gsub(".h5ad", "", filename, fixed = TRUE), "_future-state-prop",
+                     future_state_prop, ".h5ad")
+  convertSeuratToH5ad(SeuratObj, assays = c("RNA"), filename)
+  filename <- paste0(gsub(".h5ad", "", filename, fixed = TRUE),
+                     "_assay-RNA.h5ad")
+  g_csr <- fitTransitionModel(
+    anndata_file = filename, conda_env = "scicsr", mode = "pseudotime", 
+    pseudotime_key = "csr_pot", do_pca = FALSE
+  )
+  tpt_csr <- fitTPT(
+    anndata_file = filename, 
+    conda_env = "scicsr", CellrankObj = g_csr, group.cells.by = "IGH_c_gene",
+    source_state = 'M', target_state = target_state
+  )
+  return(list("transition_matrix" = g_csr, "tpt" = tpt_csr))
+}
+
+# for 368-07, d60 (w7), G1 is the dominant state
+sum(kim$anno_leiden_0.18 == "GC" & kim$donor == "368-07" & kim$timepoint == "d60" &
+      kim$IGH_c_gene %in% c("M", "G3", "G1")) / 
+  sum(kim$anno_leiden_0.18 == "GC" & kim$donor == "368-07" & kim$timepoint == "d60")
+# [1] 0.6890099, so future_state_prop = c(0.3, 0.2, 0.1, 0.05, 0.01)
+
+# for 368-07, d60 (w7), G1 is the dominant state
+sum(kim$anno_leiden_0.18 == "GC" & kim$donor == "368-20" & kim$timepoint == "d60" &
+      kim$IGH_c_gene %in% c("M", "G3", "G1")) / 
+  sum(kim$anno_leiden_0.18 == "GC" & kim$donor == "368-20" & kim$timepoint == "d60")
+# [1] 0.9123103, so future_state_prop = c(0.05, 0.01)
+
+csr_downsample <- list(
+  "368-07_d60" = lapply(
+    c(0.3, 0.2, 0.1, 0.05, 0.01, 0.005), downsampling_future_states,
+    SeuratObj = subset(kim, subset = (anno_leiden_0.18 == "GC" & donor == "368-07" &
+                                      timepoint %in% c("d60"))), seed = 123,
+    filename = "WU368_kim_et_al_nature_2022_gex_b_cells_368-07_w7_GC.h5ad"
+  ),
+  "368-20_d60" = lapply(
+    c(0.05, 0.01, 0.005), downsampling_future_states,
+    SeuratObj = subset(kim, subset = (anno_leiden_0.18 == "GC" & donor == "368-20" &
+                                      timepoint %in% c("d60"))), seed = 123,
+    filename = "WU368_kim_et_al_nature_2022_gex_b_cells_368-20_w7_GC.h5ad"
+  )
+)
+saveRDS(csr_downsample, "csr_isotype_gc_downsample.rds")
+
+downsample_flux_in <- list(
+  reshape2::melt(sapply(csr_downsample[['368-07_d60']], 
+                        function(x) {
+                          isotypes <- c("M", "G3", "G1", "A1", "G2", "G4", "E", "A2")
+                          y <- x$tpt$gross_flux
+                          isotypes <- isotypes[which(isotypes %in% rownames(y))]
+                          y <- y[isotypes, isotypes]
+                          y[lower.tri(y)] <- 0
+                          y <- colSums(y)
+                          return( y / sum(y) )
+  })),
+  reshape2::melt(sapply(csr_downsample[['368-20_d60']], 
+                        function(x) {
+                          isotypes <- c("M", "G3", "G1", "A1", "G2", "G4", "E", "A2")
+                          y <- x$tpt$gross_flux
+                          isotypes <- isotypes[which(isotypes %in% rownames(y))]
+                          y <- y[isotypes, isotypes]
+                          y[lower.tri(y)] <- 0
+                          y <- colSums(y)
+                          return( y / sum(y) )
+  }))
+)
+downsample_flux_in[[1]]$donor <- c("368-07")
+downsample_flux_in[[2]]$donor <- c("368-20")
+downsample_flux_in[[1]]$Var2 <- factor(
+  downsample_flux_in[[1]]$Var2, 
+  labels = paste0(100 - c(0.3, 0.2, 0.1, 0.05, 0.01, 0.005) * 100, "%")
+)
+downsample_flux_in[[2]]$Var2 <- factor(
+  downsample_flux_in[[2]]$Var2, 
+  labels = paste0(100 - c(0.05, 0.01, 0.005) * 100, "%")
+)
+downsample_flux_in <- do.call("rbind", downsample_flux_in)
+colnames(downsample_flux_in) <- c("subisotype", "current_state_prop", "flux_in", "donor")
+downsample_flux_in$timepoint <- "d110"
+
+# also do the cosine similarity calculations against the observed distribution at w15
+preds_downsample <- merge(brep_count, downsample_flux_in, 
+                          by = c("donor", "timepoint", "subisotype"),
+                          all = TRUE)
+preds_downsample <- preds_downsample[which(preds_downsample$gex_anno == "GC"), ]
+preds_downsample <- preds_downsample[which(preds_downsample$timepoint %in% c("d110")), ]
+preds_downsample <- preds_downsample[which(!is.na(preds_downsample$flux_in)), ]
+preds_downsample_comparisons <- ddply(preds_downsample, c("donor", "current_state_prop"), summarise,
+      cosine = philentropy::cosine_dist(flux_in, prop, testNA = FALSE),
+      jsd = philentropy::jensen_shannon(flux_in, prop, testNA = FALSE, unit = "log2"),
+      spearman = cor(flux_in, prop, method = "spearman"))
+preds_downsample_comparisons
+```
+
+```{r}
+pdf("csr_isotype_downsample_flux_in_cosine.pdf", width = 4, height = 3.5)
+ggplot(preds_downsample_comparisons[which(preds_downsample_comparisons$donor == "368-07"), ], 
+       aes(x = current_state_prop, y = cosine, group = donor)) +
+  geom_point() + geom_line() + scale_color_brewer(type = "qual", palette = "Set1") +
+  scale_x_discrete(name = "% IgG1") + 
+  ylab("cosine similarity vs\nrepertoire at w15") + cowplot::theme_cowplot()
+dev.off()  
+```
+
+```{r, fig.width=10, fig.height=4.5}
+downsample_flux_in$subisotype <- factor(downsample_flux_in$subisotype,
+                                        levels = c("M", "D", "G3", "G1", "A1", "G2", "G4",
+                                                   "E", "A2"))
+pdf("csr_isotype_downsample_flux_in.pdf", width = 10, height = 4.5)
+cowplot::plot_grid(
+  ggplot(brep_count[which(brep_count$gex_anno == "GC" & 
+                            brep_count$donor %in% c("368-07", "368-20") &
+                            brep_count$timepoint == "d110"), ],
+         aes(x = prop, y = subisotype)) +
+    geom_bar(stat = "identity", fill = "#00BFC4") + scale_y_discrete(drop = FALSE) +
+    scale_x_continuous(labels = scales::percent, name = "% BCR", 
+                       breaks = c(0, 0.2, 0.4, 0.6), limits = c(0, 0.65)) +
+    facet_wrap(~ donor, nrow = 2, scales = "free_x") + cowplot::theme_cowplot() +
+    theme(axis.text.x = element_text(size = 10)),
+  ggplot(downsample_flux_in, aes(x = flux_in, y = subisotype)) +
+    geom_bar(stat = "identity", fill = "#F8766D") + scale_y_discrete(drop = FALSE) +
+    scale_x_continuous(labels = scales::percent, name = "% flux in", 
+                       breaks = c(0, 0.2, 0.4, 0.6), limits = c(0, 0.65)) +
+    facet_wrap(~ interaction(future_state_prop, donor, drop = TRUE, sep = ", "), 
+               ncol = 6, scales = "free_x") +
+    cowplot::theme_cowplot() + theme(axis.text.x = element_text(size = 10)),
+    ncol = 2, rel_widths = c(1, 4), axis = "tb"
+)
+dev.off()
+```
+
+# effect of changing source/target states on inference
+
+```{r}
+isotypes <- c("M", "G3", "G1", "A1", "G2", "G4", "A2")
+# fit transitions based on csr, group cells by isotype
+csr <- apply(data.frame(donor = c("368-07"), 
+                        timepoint = c("d110"),
+                        stringsAsFactors = FALSE), MARGIN = 1, function(x){
+  timepoint <- as.character(x[2]); donor <- as.character(x[1])                        
+  filename <- paste0("WU368_kim_et_al_nature_2022_gex_b_cells_", donor,
+                     "_GC_IGHC_assay-RNA_", timepoint, ".h5ad")
+  g_csr <- fitTransitionModel(
+    anndata_file = filename, conda_env = "scverse", mode = "pseudotime", 
+    pseudotime_key = "csr_pot", do_pca = FALSE
+  )
+  tpt_csr <- lapply(isotypes, function(from){
+    lapply(isotypes, function(to){
+      if( from != to )
+      fitTPT(
+        anndata_file = filename, 
+        conda_env = "scverse", CellrankObj = g_csr, group.cells.by = "IGH_c_gene",
+        source_state = from, target_state = to
+      )
+    })
+  })
+  return(list("transition_matrix" = g_csr, "tpt" = tpt_csr))
+})
+names(csr) <- c("368-07_d110")
+saveRDS(csr[[1]], "csr_isotype_gc_allTPT.rds")
+
+```
+
+```{r}
+tpt2 <- readRDS("csr_isotype_gc_allTPT.rds")
+isotypes <- c("M", "G3", "G1", "A1", "G2", "G4", "A2")
+names(tpt2$tpt) <- isotypes
+tpt2 <- lapply(tpt2$tpt, function(l){
+  names(l) <- isotypes
+  return(l)
+})
+
+plotAllFluxes <- function(tpt_obj, c_genes = isotypes,
+                          mask_improbable_csr = TRUE, return_plot = FALSE)
+{
+  if(is.null(tpt_obj)) return(NULL)
+  states <- tpt_obj$pathways$path[[1]]
+  states <- states[c(1, length(states))]
+  source <- states[1]; target <- states[2]
+  significance_matrix <- tpt_obj$significance
+  flux_matrix <- tpt_obj$gross_flux
+  c_genes <- c_genes[which(c_genes %in% rownames(flux_matrix))]
+  flux_matrix <- flux_matrix[c_genes, c_genes]
+  significance_matrix <- significance_matrix[c_genes, c_genes]
+  if(mask_improbable_csr){
+    flux_matrix[lower.tri(flux_matrix)] <- 0
+  }
+  graph <- reshape2::melt(flux_matrix, value.name = "flux", varnames = c("from", "to"))
+  graph <- graph[which(graph$flux > 0), ]
+  graph <- merge(graph,
+                 reshape2::melt(significance_matrix, varnames = c("from", "to"),
+                                value.name = "pval"))
+  graph$signif <- -log(p.adjust(graph$pval))
+  p <- ggplot(graph, aes_string(x = "from", y = "to", color = "flux", size = "signif")) +
+    geom_point() + cowplot::theme_cowplot() + scale_colour_gradient2(name = "% flux") +
+    scale_size_continuous(name = "p-value", breaks = c(-log(1), -log(0.5), -log(0.1), -log(0.05)),
+                          labels = c("1", "0.5", "0.1", "0.05")) +
+    scale_x_discrete(drop = FALSE, position = "top") + scale_y_discrete(drop = FALSE)
+  if( return_plot ) return(p)
+  else return(graph)
+}
+
+tpt3 <- lapply(tpt2, function(l) {
+  if( !is.null(l) ){
+    o <- lapply(l, plotAllFluxes, mask_improbable_csr = TRUE)
+    return(o)
+  } else return(NULL)
+})
+tpt3 <- do.call("rbind", lapply(names(tpt3), function(x){
+  l <- lapply(names(tpt3[[x]]), function(y){
+    tb <- tpt3[[x]][[y]]
+    if( !is.null(tb) ){
+      tb$source_state <- x
+      tb$target_state <- y
+      return(tb)
+    } else return(NULL)
+  })
+  do.call("rbind", l)
+}))
+
+tpt3$source_state <- factor(tpt3$source_state, levels = isotypes, 
+                            labels = paste0("source = ", isotypes))
+tpt3$target_state <- factor(tpt3$target_state, levels = isotypes, 
+                            labels = paste0("target = ", isotypes))
+tpt3$from <- factor(tpt3$from, levels = isotypes)
+tpt3$to <- factor(tpt3$to, levels = isotypes)
+
+```
+
+```{r, fig.width = 11, fig.height=8}
+
+svg("KimEtAl_Covid/Kim_Covid_GLT_figures/all_source_target_rawFlux.svg", width = 12, height=  9)
+ggplot(tpt3, aes_string(x = "from", y = "to", color = "flux", size = "signif")) +
+  geom_point() + cowplot::theme_cowplot() + 
+  scale_colour_gradient2(name = "% flux") +
+  scale_size_continuous(name = "p-value", breaks = c(-log(1), -log(0.5), -log(0.1), -log(0.05)),
+                        labels = c("1", "0.5", "0.1", "0.05")) +
+  scale_x_discrete(drop = FALSE, position = "top") + scale_y_discrete(drop = FALSE) +
+  ggh4x::facet_grid2(source_state ~ target_state, scales = "free", independent = "all") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0, size = 8), axis.text.y = element_text(size = 8))
+dev.off()
+
+```
+
+```{r}
+sessionInfo()
+```

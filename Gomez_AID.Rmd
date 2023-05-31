@@ -1,0 +1,388 @@
+---
+title: "Gómez-Escolar et al Aicda knockout"
+output: html_notebook
+---
+
+Gómez-Escolar et al dataset on mice with AID knocked-out versus WT mice. 
+
+Paper [here](https://doi.org/10.15252/embr.202255000)
+
+Data downloaded from GEO accession [GSE189775](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE189775).
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE, fig.path = "Gomez_AID_Figures/",
+                      dev = "svg")
+library(Seurat)
+library(sciCSR)
+library(plyr)
+library(ggplot2)
+```
+
+```{r, eval=FALSE}
+# just use the count matrix provided in the GEO entry without any filtering
+gomez <- c("GSE189775_count_matrix_table.csv")
+gomez <- read.csv(gomez, check.names = FALSE)
+colnames(gomez) <- gsub(".", "-", colnames(gomez), fixed = TRUE)
+rownames(gomez) <- gomez[, 1]
+gomez <- gomez[, -1]
+gomez <- as.matrix(gomez)
+gomez <- as(gomez, "sparseMatrix")
+gomez <- CreateSeuratObject( gomez, project = "Gomez_AID",
+                             min.cells = 0, min.features = 0 )
+```
+
+```{r, eval=FALSE}
+gomez
+```
+
+```{r, eval=FALSE}
+# Add the metadata table provided on the GEO entry
+metadata <- read.table("GSE189775_metadata_allmice.csv", sep = ";",
+                       stringsAsFactors = FALSE, header = TRUE)
+rownames(metadata) <- metadata$barcode
+metadata <- metadata[, -1]
+metadata$percent.mt <- as.numeric(prettyNum(metadata$percent.mt, input.d.mark = ",",
+                                            decimal.mark = "."))
+gomez <- AddMetaData(gomez, metadata)
+```
+
+```{r, eval=FALSE}
+# follow methods in Gomez-Escolar et al EMBO Rep paper
+gomez <- NormalizeData(gomez, verbose = FALSE)
+gomez <- FindVariableFeatures(gomez, nfeatures = 2000, verbose = FALSE)
+gomez <- ScaleData(gomez, features = rownames(gomez), verbose = FALSE)
+gomez <- RunPCA(gomez, features = VariableFeatures(gomez), verbose = FALSE)
+gomez <- RunUMAP(gomez, reduction = "pca", dims = 1:30, verbose = FALSE,
+                 umap.method = "umap-learn", metric = "correlation")
+gomez <- FindNeighbors(gomez, dims = 1:30, verbose = FALSE)
+```
+
+```{r, eval=FALSE, fig.width=5, fig.height=4}
+DimPlot(gomez, group.by = "seurat_clusters", label = TRUE)
+```
+
+```{r, eval=FALSE, fig.width=8, fig.height=4}
+DimPlot(gomez, group.by = "seurat_clusters", label = TRUE, split.by = "genot")
+```
+
+```{r, eval=FALSE}
+saveRDS(gomez, file = "Gomez_AID.rds")
+```
+
+```{r, eval=FALSE, fig.width=8, fig.height=5}
+c_genes <- c("Ighm", "Ighd", "Ighg3", "Ighg1", "Ighg2b", "Ighg2c", "Ighe", "Igha")
+cowplot::plot_grid(
+  DotPlot(gomez[, which(gomez$genot == "KO")], features = c_genes, 
+          group.by = "seurat_clusters") + ggtitle("Aicda KO") + RotatedAxis(),
+  DotPlot(gomez[, which(gomez$genot == "WT")], features = c_genes, 
+          group.by = "seurat_clusters") + ggtitle("WT") + RotatedAxis(),
+  nrow = 1, align = "h", axis = "tb" 
+)
+```
+
+```{r, eval=FALSE}
+bamfiles <- c('cellranger/outs/per_sample_outs/AID/count/sample_alignments.bam')
+data("mouse_definitions")
+gomez_IGH <- lapply(bamfiles, function(bamfile){
+  cat(paste0(bamfile, " ...\n"))
+  out <- getIGHmapping(bamfile, mouse_definitions)
+  out2 <- getIGHreadType(out$read_count)
+  out3 <- summariseIGHreads(out2, mouse_definitions)
+  out3
+})
+gomez_IGH <- gomez_IGH[[1]]
+save("gomez_IGH", file="Gomez_AID_IGHC-counts.RData")
+```
+
+```{r, eval=FALSE}
+load("Gomez_AID_IGHC-counts.RData")
+gomez_IGH <- gomez_IGH[ which( rownames(gomez_IGH) %in% Cells(gomez) ), ] # only cells surviving in the dataset
+gomez_IGH <- rbind(gomez_IGH, 
+                    matrix(0, nrow = sum( ! Cells(gomez) %in% rownames(gomez_IGH)), ncol = ncol(gomez_IGH),
+                           dimnames =  list( Cells(gomez)[which(!Cells(gomez) %in% rownames(gomez_IGH))],
+                                             colnames(gomez_IGH)), 
+                           byrow = TRUE)
+                    )
+gomez_IGH <- t( gomez_IGH )
+gomez[['IGHC']] <- CreateAssayObject( counts = gomez_IGH )
+gomez <- NormalizeData( gomez, assay = "IGHC" )
+```
+
+```{r, eval=FALSE, fig.width=9, fig.height=5}
+genes <- c(rownames(gomez@assays$IGHC)[grepl("-P$", rownames(gomez@assays$IGHC))],
+           rownames(gomez@assays$IGHC)[grepl("-S$", rownames(gomez@assays$IGHC))])
+
+cowplot::plot_grid(
+  DotPlot(gomez[, which(gomez$genot == "KO")], group.by = "seurat_clusters",
+          features = genes, assay = "IGHC") + ggtitle("Aicda KO") + RotatedAxis(),
+  DotPlot(gomez[, which(gomez$genot == "WT")], group.by = "seurat_clusters", 
+          features = genes, assay = "IGHC") + ggtitle("WT") + RotatedAxis(),
+  nrow = 1, align = "h", axis = "tb" 
+)
+
+```
+
+```{r, eval=FALSE}
+saveRDS(gomez, "Gomez_AID.rds")
+```
+
+### merge the V gene identity data onto the Seurat object
+
+We need this for the SHM pseudotime analysis.
+
+
+```{r, eval=FALSE}
+vdj <- "cellranger/outs/per_sample_outs/AID/vdj_b/filtered_contig_annotations.csv"
+vdj <- read.csv(vdj, stringsAsFactors = FALSE)
+
+igblast <- read.table("cellranger/outs/per_sample_outs/AID/vdj_b/Gomez-Escolar_filtered_contig_igblast.tsv", sep = "\t", stringsAsFactors = FALSE, header = TRUE)
+
+vdj <- merge(vdj, igblast[, c("sequence_id", "v_identity")],
+             by.x = "contig_id", by.y = "sequence_id", all.x = TRUE, all.y = FALSE,
+             sort = FALSE)
+
+```
+
+```{r, eval=FALSE}
+# 'collapseBCR' annotate for each cell whether you see > 1H and/or 1L
+collapsed <- collapseBCR(vdj, format = "10X", full.table = TRUE)
+
+# the full table is accessible as $full.table like so:
+collapsed_slim <- collapsed$collapsed.table
+
+collapsed_slim$sample_name <- "SeuratProject"
+# this add Seurat Object metadata to the VDJ table
+collapsed_slim <- AddCellMetaToVDJ(
+  vdj = collapsed_slim,
+  SeuratObj = gomez,
+  metadata_col = c("Genotype_classification", "genot")
+)
+
+collapsed$full.table$sample_name <- "SeuratProject"
+# again same for the full version
+collapsed <- AddCellMetaToVDJ(
+  vdj = collapsed$full.table,
+  SeuratObj = gomez,
+  metadata_col = c("Genotype_classification", "genot")
+)
+
+# add the VDJ data frame to Seurat Object
+gomez <- combineBCR(
+  collapsed_slim, gomez, seurat_sample_column = "orig.ident",
+  keep_columns = c("v_gene", "d_gene", "j_gene", "c_gene", "v_identity", "full_length", 
+                   "productive", "cdr3", "cdr3_nt", "reads", "umis")
+)
+
+DimPlot(gomez, split.by = "bcr_type", ncol = 3)
+```
+
+```{r, eval=FALSE}
+gomez$seurat_clusters <- factor(gomez$seurat_clusters, levels = c("Mem.Act", "Mem.Act2",
+                                                                  "Mem.GC",
+                                                                  "GC.DZ", "GC.LZ", 
+                                                                  "E-prePB", "L-prePB",
+                                                                  "PB"))
+Idents(gomez) <- gomez$seurat_clusters
+gomez <- getCSRpotential(gomez, isotype_column_to_add = "isotype", knn_graph = TRUE,
+                         vars.to.regress = "nCount_RNA", c_gene_anno_name = "csr",
+                         reference_based = "mouse")
+gomez <- getSHM(gomez, v_identity_anno_name = "IGH_v_identity")
+convertSeuratToH5ad(gomez, assays = c("RNA", "IGHC"), 
+                    "Gomez_AID.h5ad")
+# split into wt and kd
+splitAnnData(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Gomez-Escolar_AIDkd/Gomez_AID_assay-RNA.h5ad",
+  split.by = "genot", levels = c("WT", "KO"), conda_env = "scicsr"
+)
+
+
+saveRDS(gomez, "Gomez_AID_VDJ_IGHC.rds")
+```
+
+Now run cellrank and fit TPT separately on:
+
+* WT: transitions estimated using (1) SHM (2) CSR
+* KO: transitions estimated using (1) SHM (2) CSR
+
+
+```{r}
+#----------------------------------
+# fit transitions based on csr
+g_wt_csr <- fitTransitionModel(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Gomez-Escolar_AIDkd/Gomez_AID_assay-RNA_WT.h5ad", 
+  conda_env = "scicsr", mode = "pseudotime", pseudotime_key = "csr_pot"
+)
+tpt_wt_csr <- fitTPT(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Gomez-Escolar_AIDkd/Gomez_AID_assay-RNA_WT.h5ad", 
+  conda_env = "scicsr", CellrankObj = g_wt_csr, group.cells.by = "seurat_clusters",
+  source_state = 'Mem.Act2', target_state = 'PB'
+)
+g_ko_csr <- fitTransitionModel(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Gomez-Escolar_AIDkd/Gomez_AID_assay-RNA_KO.h5ad", 
+  conda_env = "scicsr", mode = "pseudotime", pseudotime_key = "csr_pot"
+)
+tpt_ko_csr <- fitTPT(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Gomez-Escolar_AIDkd/Gomez_AID_assay-RNA_KO.h5ad", 
+  conda_env = "scicsr", CellrankObj = g_ko_csr, group.cells.by = "seurat_clusters",
+  source_state = 'Mem.Act2', target_state = 'PB'
+)
+
+#----------------------------------
+# fit transitions based on shm
+g_wt_shm <- fitTransitionModel(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Gomez-Escolar_AIDkd/Gomez_AID_assay-RNA_WT.h5ad", 
+  conda_env = "scicsr", mode = "pseudotime", pseudotime_key = "shm"
+)
+tpt_wt_shm <- fitTPT(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Gomez-Escolar_AIDkd/Gomez_AID_assay-RNA_WT.h5ad", 
+  conda_env = "scicsr", CellrankObj = g_wt_shm, group.cells.by = "seurat_clusters",
+  source_state = 'Mem.Act2', target_state = 'PB'
+)
+g_ko_shm <- fitTransitionModel(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Gomez-Escolar_AIDkd/Gomez_AID_assay-RNA_KO.h5ad", 
+  conda_env = "scicsr", mode = "pseudotime", pseudotime_key = "shm"
+)
+tpt_ko_shm <- fitTPT(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Gomez-Escolar_AIDkd/Gomez_AID_assay-RNA_KO.h5ad", 
+  conda_env = "scicsr", CellrankObj = g_ko_shm, group.cells.by = "seurat_clusters",
+  source_state = 'Mem.Act2', target_state = 'PB'
+)
+
+```
+
+```{r, fig.width=9, fig.height=8}
+cowplot::plot_grid(
+  dim_plot(subset(gomez, subset= (genot == "KO")), group.by = "seurat_clusters") +
+    plotFlux(tpt_ko_shm, gomez, new_plot = FALSE) + theme(legend.position = "none") +
+    ggtitle("Aicda KO - SHM"),
+  dim_plot(subset(gomez, subset= (genot == "WT")), group.by = "seurat_clusters") +
+    plotFlux(tpt_wt_shm, gomez, new_plot = FALSE) + theme(legend.position = "none") +
+    ggtitle("WT - SHM"),
+  dim_plot(subset(gomez, subset= (genot == "KO")), group.by = "seurat_clusters") +
+    plotFlux(tpt_ko_csr, gomez, new_plot = FALSE) + theme(legend.position = "none") +
+    ggtitle("Aicda KO - CSR"),
+  dim_plot(subset(gomez, subset= (genot == "WT")), group.by = "seurat_clusters") +
+    plotFlux(tpt_wt_csr, gomez, new_plot = FALSE) + theme(legend.position = "none") +
+    ggtitle("WT - CSR"),
+  nrow = 2, align = "hv", axis = "tblr"
+)
+
+#-----------------------------
+# compare the transition matrices
+compareTransitionMatrices(list(g_wt_shm$transition_matrix,
+                               g_wt_csr$transition_matrix),
+                          SeuratObj = gomez, distance_metric = "JSD",
+                          cells = Seurat::Cells(gomez)[gomez$genot == "WT"],
+                          group.by = 'seurat_clusters')$distance
+compareTransitionMatrices(list(g_ko_shm$transition_matrix,
+                               g_ko_csr$transition_matrix),
+                          SeuratObj = gomez, distance_metric = "JSD", 
+                          cells = Seurat::Cells(gomez)[gomez$genot == "KO"],
+                          group.by = 'seurat_clusters')$distance
+```
+
+```{r}
+#-----------------------------
+# analyse transition between isotypes 
+tpt_wt_isotype <- fitTPT(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Gomez-Escolar_AIDkd/Gomez_AID_assay-RNA_WT.h5ad", 
+  conda_env = "scicsr", CellrankObj = g_wt_csr, group.cells.by = "isotype",
+  source_state = 'M', target_state = 'A'
+)
+tpt_ko_isotype <- fitTPT(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Gomez-Escolar_AIDkd/Gomez_AID_assay-RNA_KO.h5ad", 
+  conda_env = "scicsr", CellrankObj = g_ko_csr, group.cells.by = "isotype",
+  source_state = 'M', target_state = 'G2b' # no cells with isotype beyond G2b
+)
+save("tpt_wt_isotype", "tpt_ko_isotype", file = "csr_isotype.rda")
+```
+
+```{r}
+gomez <- readRDS("Gomez_AID_VDJ_IGHC.rds")
+load("csr_isotype.rda")
+```
+
+## Examine stationary distribution
+
+```{r}
+stationary <- list(plotStationaryDistribution(tpt_wt_isotype, gomez, 
+                                              return_plot = FALSE),
+                   plotStationaryDistribution(tpt_ko_isotype, gomez, 
+                                              return_plot = FALSE))
+stationary[[1]]$setup <- "WT"
+stationary[[2]]$setup <- "Aicda KO"
+stationary <- rbind(stationary[[1]], stationary[[2]])
+stationary$setup <- factor(stationary$setup, levels=  c("WT", "Aicda KO"))
+
+svg("Gomez_AID_Figures/Gomez_stationary.svg", width =7, height=3.5)
+ggplot(stationary, aes(x = isotype, y = stationary, fill = setup, 
+                       ymin = lowq, ymax = highq)) +
+  geom_bar(position = position_dodge2(), stat = "identity") + 
+  geom_errorbar(width = 0, position = position_dodge2()) + cowplot::theme_cowplot() +
+  facet_wrap(~ setup, strip.position = "bottom") + 
+  scale_y_reverse(name = "stationary\ndistribution") +
+  scale_x_discrete(drop=FALSE, position = "top") +
+  scale_fill_manual(values = c("Aicda KO" = "grey", "WT" = "grey30"))
+dev.off()
+```
+
+## Side-by-side comparison with observed isotype distribution
+
+```{r, fig.height=4, fig.width=4}
+obs_isotypes <- data.frame(table(gomez$csr, gomez$genot))
+obs_isotypes <- obs_isotypes[which(obs_isotypes$Var1 != ""), ]
+obs_isotypes <- merge(
+  obs_isotypes, ddply(obs_isotypes, "Var2", summarise, total = sum(Freq)),
+  by = c("Var2")
+)
+obs_isotypes$prop <- obs_isotypes$Freq / obs_isotypes$total
+
+stationary$type <- "sciCSR"
+obs_isotypes$type <- "observed"
+obs_isotypes$Var1 <- factor(
+  obs_isotypes$Var1,
+  levels = c("IGHM", "IGHD", "IGHG3", "IGHG1", "IGHG2B", "IGHG2C", "IGHE", "IGHA"),
+  labels = c("M", "D", "G3", "G1", "G2b", "G2c", "E", "A")
+)
+obs_isotypes$lowq <- obs_isotypes$prop
+obs_isotypes$highq <- obs_isotypes$prop
+obs_isotypes$Var2 <- factor(obs_isotypes$Var2, levels= c("WT", "KO"), 
+                            labels = c("WT", "Aicda KO"))
+stationary <- list(
+  stationary[, c("isotype", "stationary", "lowq", "highq", "setup", "type")],
+  obs_isotypes[, c("Var1", "prop", "lowq", "highq", "Var2", "type")]
+)
+colnames(stationary[[2]]) <- colnames(stationary[[1]])
+stationary <- do.call("rbind", stationary)
+stationary$isotype <- factor(
+  stationary$isotype,
+  levels = c("M", "D", "G3", "G1", "G2b", "G2c", "E", "A")
+)
+stationary$type <- factor(stationary$type, levels = c("sciCSR", "observed"))
+svg("Gomez_AID_Figures/gomez_stationary_compare_obs.svg", width =4, height=4)
+ggplot(stationary, aes(x = stationary, y = isotype, fill = type, 
+                       xmin = lowq, xmax = highq)) +
+  geom_bar(position = position_dodge2(), stat = "identity") + 
+  geom_errorbar(width = 0, position = position_dodge2()) + cowplot::theme_cowplot() +
+  facet_grid(setup ~ type, scales = "free_x") + 
+  scale_x_continuous(name = "isotype distribution") +
+  scale_y_discrete(drop=FALSE) + ylab("") +theme(axis.text.x = element_text(size = 8))
+  #scale_fill_manual(values = c("IL23-/-" = "grey", "WT" = "grey30"))
+dev.off()
+```
+
+## Calculate cosine similarity between observed isotype distribution and sciCSR stationary distribution from the Markov state model
+
+```{r}
+stationary2 <- reshape2::dcast(stationary, setup + isotype ~ type, value.var = "stationary")
+stationary2$sciCSR[is.na(stationary2$sciCSR)] <- 0
+stationary2$observed[is.na(stationary2$observed)] <- 0
+ddply(stationary2, c("setup"), summarise,
+      cosine = philentropy::cosine_dist(sciCSR, observed, testNA = FALSE),
+      jsd = philentropy::jensen_shannon(sciCSR, observed, testNA = FALSE, unit = "log2"),
+      spearman = cor(sciCSR, observed, method = "spearman"))
+```
+
+```{r}
+sessionInfo()
+```

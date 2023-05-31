@@ -1,0 +1,494 @@
+---
+title: "scRNA-seq and scBCR-seq of naive B cells cultured under interferon gamma"
+output: html_notebook
+---
+
+```{r setup, include=FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(sciCSR, quietly = TRUE)
+# We also need the Seurat package as sciCSR interfaces 
+# with Seurat data objects to manipulate scRNA-seq data
+library(Seurat)
+
+# Run this if this is the first time you set up sciCSR on 
+# your machine; this set up the dependencies in python
+prepare_sciCSR()
+
+```
+
+# Load the dataset
+```{r}
+scIFNg <- Read10X("/media/josephn/Seagate4TB/GLT_datasets/scIFNg/scIFNg/outs/count/filtered_feature_bc_matrix")
+scIFNg_obj <- CreateSeuratObject(scIFNg[[1]], project = "scIFNg", min.cells = 3, min.fetaures = 200)
+
+# Read in the hashtag counts and demultiplex
+# following https://satijalab.org/seurat/articles/hashing_vignette.html
+scIFNg_obj <- AddMetaData(scIFNg_obj, metadata = scIFNg[[2]][1, ], 
+                          col.name = "CD27_TotalSeq")
+scIFNg_obj[["HTO"]] <- CreateAssayObject(scIFNg[[2]][-1, ])
+scIFNg_obj <- NormalizeData(scIFNg_obj, assay = "HTO", normalization.method = "CLR")
+scIFNg_obj <- HTODemux(scIFNg_obj, assay = "HTO", positive.quantile = 0.99)
+scIFNg <- scIFNg_obj
+rm(scIFNg_obj)
+gc()
+```
+
+
+```{r}
+# preprocessing pipeline wrapped in normalise_dimreduce function
+scIFNg <- normalise_dimreduce(scIFNg, run.harmony = TRUE, 
+                              harmony_vars = "HTO_maxID")
+# Re-run the kNN and clustering steps using the 'harmonised' PCA
+scIFNg <- FindNeighbors(scIFNg, reduction = "harmony", dims = 1:11)
+scIFNg <- FindClusters(scIFNg, resolution = 0.5)
+```
+
+```{r}
+scIFNg$Day <- sapply(Cells(scIFNg), function(x){
+  if(grepl("-1$", x)) return("D0")
+  if(grepl("-2$", x)) return("D3")
+  if(grepl("-3$", x)) return("D6")
+})
+DimPlot(scIFNg, group.by = c("seurat_clusters", "Day"), label = TRUE)
+DimPlot(scIFNg, split.by = "HTO_maxID")
+```
+
+# Integrating scBCR-seq repertoire data
+
+
+```{r, fig.width=5, fig.height = 3.5}
+# this is the filtered_contig_annotations.csv file from cellranger vdj
+vdj <- "/media/josephn/Seagate4TB/GLT_datasets/scIFNg/scIFNg/outs/vdj_b/filtered_contig_annotations.csv"
+vdj <- read.csv(vdj, stringsAsFactors = FALSE)
+
+# this is the AIRR-format output from IMGT/HighV-Quest
+vquest <- c(
+  "/media/josephn/Seagate4TB/GLT_datasets/scIFNg/scIFNg/outs/vdj_b/igblastn_airr/D0_filtered_contig_airr.tsv",
+  "/media/josephn/Seagate4TB/GLT_datasets/scIFNg/scIFNg/outs/vdj_b/igblastn_airr/D3_filtered_contig_airr.tsv",
+  "/media/josephn/Seagate4TB/GLT_datasets/scIFNg/scIFNg/outs/vdj_b/igblastn_airr/D6_filtered_contig_airr.tsv"
+)
+vquest <- lapply(vquest, read.table, sep = "\t", stringsAsFactors = FALSE, header = TRUE)
+vquest[[2]]$sequence_id <- gsub("-1", "-2", vquest[[2]]$sequence_id)
+vquest[[3]]$sequence_id <- gsub("-1", "-3", vquest[[3]]$sequence_id)
+vquest <- do.call("rbind", vquest)
+
+# The % sequence identity to germline V allele is the column 'v_identity'
+# We want to merge this column into cellranger vdj output 
+# using the sequence IDs as keys
+vdj <- merge(vdj, vquest[, c("sequence_id", "v_identity")],
+             by.x = "contig_id", by.y = "sequence_id", 
+             all.x = TRUE, all.y = FALSE, sort = FALSE)
+```
+
+```{r}
+# 1 H and 1 L at most, for each cell barcode
+collapsed <- collapseBCR(vdj, format = "10X")
+```
+
+```{r}
+scIFNg$Donor <- scIFNg$HTO_maxID
+
+# annotations from the Seurat Object into the VDJ table
+collapsed <- AddCellMetaToVDJ(
+  vdj = collapsed,
+  SeuratObj = scIFNg,
+  metadata_col = c("Donor", "Day")
+)
+```
+
+```{r}
+# annotate isotypes from contigs which are dropped due to incomplete sequences
+# (they still represent switching events! Just that theywere sacrificied in 
+# the preprocessing of repertoires because of incomplete VDJ annotations etc)
+all_contigs <- c(
+  "/media/josephn/Seagate4TB/GLT_datasets/scIFNg/D0/outs/multi/vdj_b/all_contig_annotations.csv",
+  "/media/josephn/Seagate4TB/GLT_datasets/scIFNg/D3/outs/multi/vdj_b/all_contig_annotations.csv",
+  "/media/josephn/Seagate4TB/GLT_datasets/scIFNg/D6/outs/multi/vdj_b/all_contig_annotations.csv"
+)
+all_contigs <- lapply(all_contigs, read.csv, stringsAsFactors = FALSE)
+all_contigs <- repairBarcode(all_contigs, scIFNg, sample_names = c("D0", "D3", "D6"),
+                             seurat_sample_column = "Day")
+all_contigs <- do.call("rbind", all_contigs)
+
+# fill in those cells in the collapsed vdj table in case a switched transcript 
+# is missed in the filtered_contig CSVs
+# (the filter for complete VDJ observations would underestimate level of switching)
+collapsed$c_gene_final <- apply(collapsed[, c("barcode", "chain", "c_gene")], 1, function(x){
+  if(x[2] == "IGH"){
+    all_c <- unique(all_contigs[which(all_contigs$barcode == x[1] & 
+                                        ! grepl("IG[KL]", all_contigs$c_gene)),
+                                "c_gene"])
+    all_c <- all_c[which(all_c != "")]
+    all_c <- all_c[which(all_c != x[3])]
+    if(length(all_c) == 0) return(x[3])
+    return(paste(all_c, collapse = ","))
+  } else return(x[3])
+})
+table(collapsed$c_gene_final)
+# there are cells with M+ and D+ - to simplify record them as M+ only
+# NOTE: You don't want to run this without checking your data!
+collapsed$c_gene_final[which(grepl(",", collapsed$c_gene_final))] <- "IGHM"
+```
+
+```{r}
+# We can add data the other way round, i.e. select features from
+# repertoire and add them to the Seurat Object
+colnames(collapsed)[which(colnames(collapsed) == "Day")] <- "sample_name"
+scIFNg <- combineBCR(
+  collapsed, scIFNg,
+  # list the columns from vdj you wish to add to the Seurat object down here
+  keep_columns = c("v_gene", "d_gene", "j_gene", "c_gene", "c_gene_final",
+                   "v_identity", "full_length", 
+                   "productive", "cdr3", "cdr3_nt", 
+                   "reads", "umis")
+)
+```
+
+# Enumerating productive and sterile immunoglobulin heavy chain transcripts
+
+```{r}
+data("human_definitions")
+
+bamfiles <- c(
+  "/media/josephn/Seagate4TB/GLT_datasets/scIFNg/D0/outs/per_sample_outs/D0/count/sample_alignments.bam",
+  "/media/josephn/Seagate4TB/GLT_datasets/scIFNg/D3/outs/per_sample_outs/D3/count/sample_alignments.bam",
+  "/media/josephn/Seagate4TB/GLT_datasets/scIFNg/D6/outs/per_sample_outs/D6/count/sample_alignments.bam"
+)
+
+# loop through these BAM files
+scIFNg_IGH <- lapply(bamfiles, function(bamfile){
+  cat(paste0(bamfile, " ...\n"))
+  out <- getIGHmapping(bamfile, human_definitions)
+  out2 <- getIGHreadType(out$read_count)
+  out3 <- summariseIGHreads(out2, human_definitions)
+  # 'out3' is a count matrix of productive/sterile transcript 
+  # of each isotype per cell
+  out3  
+})
+
+```
+
+```{r}
+scIFNg_IGH2 <- repairBarcode(
+  scIFNg_IGH, scIFNg,
+  sample_names = c("D0", "D3", "D6"), 
+  seurat_sample_column = "Day"
+)
+# combine these individual count matrices
+scIFNg_IGH2 <- do.call("rbind", scIFNg_IGH2)
+
+# remove cells which are not in the Seurat object but happen to have
+# observed productive/sterile transcripts
+scIFNg_IGH2 <- scIFNg_IGH2[which(rownames(scIFNg_IGH2) %in% Cells(scIFNg)), ]
+
+scIFNg <- mergIgHCountsToSeurat(scIFNg_IGH2, scIFNg, assay_name = "IGHC")
+
+```
+Now we have the productive/sterile transcript count per cell, added as a separate 'assay' in the Seurat object - below is a snippet of the count matrix:
+
+```{r}
+slot(scIFNg[["IGHC"]], "counts")[1:9, 1:3]
+```
+
+log-normalise the data and plot a bubble plot comparing the WT cells and the Il23-/- cells:
+
+```{r, fig.height = 4.5, fig.width=4}
+# Normalisation; 'IGHC' is the assay that holds the 
+# sterile/productive count data
+scIFNg <- NormalizeData( scIFNg, assay = "IGHC" )
+
+genes <- rownames(scIFNg[["IGHC"]])
+# Let's say we want to plot only the sterile and productive counts
+genes <- genes[which(grepl("-[SP]$", genes))]
+
+g <- DotPlot(scIFNg, assay = "IGHC", features = genes, group.by = "Day", split.by = "Donor", cols = c("blue", "red", "brown"))$data
+g$Day <- sapply(as.character(g$id), function(x) unlist(strsplit(x, split = "_"))[1])
+g$Donor <- sapply(as.character(g$id), function(x) unlist(strsplit(x, split = "_"))[2])
+
+svg("scIFNg_sterile_dotplot.svg", width = 4, height = 4.5)
+library(ggplot2)
+ggplot(g[g$pct.exp > 0 & !grepl("IGHM", g$features.plot) &
+           grepl("-S$", g$features.plot), ], 
+       aes(x = features.plot, y = Day, size = pct.exp, color = log10(avg.exp + 1))) +
+  geom_point() + cowplot::theme_cowplot() + facet_wrap(~ Donor, ncol = 1) +
+  scale_color_viridis_c(option = "B", name = "Average\nexpression") +
+  scale_size_continuous(name = "Percent\nexpressed") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+dev.off()
+```
+
+Plot UMAP and expression of Ki67 as a proliferative marker:
+
+```{r, fig.width=6.5, fig.height=3}
+svg("scIFNG_umap_Ki67.svg", width = 6.5, height=  3)
+cowplot::plot_grid(
+  DimPlot(scIFNg, group.by = "Day", label = TRUE),
+  Nebulosa::plot_density(scIFNg, features = "MKI67"),
+  nrow = 1, align = "h", axis = "tb"
+)
+dev.off()
+```
+
+Group cells by sterile transcript expression
+
+```{r}
+isotype_sterile <- getIsotype(
+  # sterile transcript counts only
+  scIFNg[["IGHC"]]@counts[grepl("-S", rownames(scIFNg[["IGHC"]]@counts)), ], 
+  impute_positive_counts = FALSE,
+  knn_graph = NULL
+)
+isotype_sterile <- factor(isotype_sterile, levels = levels(isotype_sterile), 
+                          labels = gsub("IGH", "", levels(isotype_sterile)))
+# add this as a column in the Seurat object
+scIFNg <- AddMetaData(scIFNg, isotype_sterile, col.name = "isotype_sterile")
+```
+
+```{r}
+# go through the isotype column so that if it is M but there is support from the 
+# VDJ-seq of a switched isotype, overwrite the IgM label
+isotype_final <- apply(FetchData(scIFNg, c("isotype", "IGH_c_gene_final")), 1, function(x){
+  if(x[1] == "M"){
+    if(!is.na(x[2]) && (!x[2] %in% c("IGHM", "IGHD") & x[2] != "")){
+      return(gsub("IGH", "", x[2]))
+    } else return(x[1])
+  } else return(x[1])
+})
+isotype_final <- factor(isotype_final, levels = c("M", "G3", "G1", "A1", "G2",
+                                                  "G4", "E", "A2"))
+scIFNg <- AddMetaData(scIFNg, isotype_final, col.name = "isotype_final")
+
+```
+
+# Isotype distribution
+
+From scBCR-seq:
+
+```{r, fig.width=5, fig.height=4.5}
+test <- FetchData(scIFNg, c("Day", "Donor", "isotype_final"))
+library(plyr)
+test <- merge(
+  ddply(test, c("Day", "Donor", "isotype_final"), nrow, .drop = FALSE),
+  ddply(test, c("Day", "Donor"), nrow, .drop = FALSE), 
+  suffixes = c("", "_total"), by = c("Day", "Donor")
+)
+test$prop <- test$V1 / test$V1_total
+
+# log transform these very small numbers ...
+test$log_prop <- log10(test$prop)
+test$log_prop[which(is.infinite(test$log_prop))] <- -4
+test <- test[which(test$Donor %in% c("P1", "P2", "P3")), ]
+test$Day <- factor(test$Day, levels = c("D0", "D3", "D6", ""))
+svg("scIFNg_isotype_distribution_scBCRseq.svg", width = 5, height =4.5)
+ggplot(test, 
+         aes(x = log_prop + 4, y = interaction(Day, isotype_final), fill = Day)) +
+    stat_summary(geom = "bar", fun = mean, 
+                 position = position_dodge2(width = 0.6)) +
+    geom_point(position = position_dodge(width = 1), pch = 21) +
+    scale_x_continuous(name = "% BCR", limits = c(0, 4),
+                       breaks = c(log10(c(seq(0.0001, 0.001, by = 0.0001),
+                                          seq(0.001, 0.01, by = 0.001)[-1],
+                                          seq(0.01, 0.1, by = 0.01)[-1],
+                                          seq(0.1, 1, by = 0.1)[-1])) + 4),
+                       labels = c("0", rep("", 8), "0.1%", rep("", 8), "1%", 
+                                  rep("", 8), "10%", rep("", 8), "100%")) +
+    scale_y_discrete(drop = FALSE, name = "") +
+    cowplot::theme_cowplot() + ylab("")
+dev.off()
+```
+
+Compare against flow cytometry of % cells positive for each isotype (productive - we are measuring protein!)
+
+```{r}
+# read in the flow cytometry measurements
+flow <- readxl::read_xlsx("flow_data_for_publication.xlsx")
+flow[, "Unswitched (IgM+IgD+) B cells"] <- 100 - flow[, "Switched (IgM-IgD-) B cells"]
+flow <- reshape2::melt(id.vars = c("Donor", "Timepoint"), data = flow[, -3])
+flow$isotype <- factor(flow$variable,
+                       levels = levels(flow$variable),
+                       label = c("G1+", "G2+", "G3+", "A+", "E+", "M+D+"))
+flow$isotype <- factor(flow$isotype,
+                       levels = c("M+D+", "G3+", "G1+", "A+", "G2+", "G4+", "E+", "A2+"))
+flow$log_prop <- log10(flow$value / 100)
+flow$log_prop[which(is.infinite(flow$log_prop))] <- -4
+flow$Timepoint <- factor(flow$Timepoint, levels = c("D0", "D3", "D6", ""))
+svg("scIFNg_isotype_distribution_flow.svg", width = 5, height =4.5)
+ggplot(flow, 
+         aes(x = log_prop + 4, y = interaction(Timepoint, isotype), fill = Timepoint)) +
+    stat_summary(geom = "bar", fun = mean, 
+                 position = position_dodge2(width = 0.6)) +
+    geom_point(position = position_dodge(width = 1), pch = 21) +
+    scale_x_continuous(name = "% cells positive", limits = c(0, 4),
+                       breaks = c(log10(c(seq(0.0001, 0.001, by = 0.0001),
+                                          seq(0.001, 0.01, by = 0.001)[-1],
+                                          seq(0.01, 0.1, by = 0.01)[-1],
+                                          seq(0.1, 1, by = 0.1)[-1])) + 4),
+                       labels = c("0", rep("", 8), "0.1%", rep("", 8), "1%", 
+                                  rep("", 8), "10%", rep("", 8), "100%")) +
+    scale_y_discrete(drop = FALSE, name = "") +
+    cowplot::theme_cowplot() + ylab("")
+dev.off()
+
+```
+
+```{r}
+saveRDS(scIFNg, file = "scIFNg.rds")
+```
+
+# Compare populations expressing different sterile transcripts
+
+Main population is the IgG sterile positive cells - compared against IgM?
+
+```{r}
+# the isotype_sterile column we made denotes which sterile transcript is expressed at the highest
+# level for each cell
+test <- lapply(c("D0", "D3", "D6"), function(x){
+    # Do FindMarkers between M+ and G+, separately for each timepoint		       
+    o <- FindMarkers(
+      subset(scIFNg, subset = (Day == x))@assays$RNA, 
+      cells.1 = Seurat::Cells(scIFNg)[which(scIFNg$Day == x & 
+                                              grepl("G", scIFNg$isotype_sterile))], 
+      cells.2 = Seurat::Cells(scIFNg)[which(scIFNg$Day == x & 
+                                              grepl("M", scIFNg$isotype_sterile))], 
+      group.by = "isotype_sterile", logfc.threshold = 0.05
+    )
+    o$gene <- rownames(o)
+    o$Day <- x
+    return(o)
+})
+test <- do.call("rbind", test)
+
+# Annotate IFN response genes (gene sets from MSigDB, v2023.1)
+hallmark_ifng <- read.table("HALLMARK_INTERFERON_GAMMA_RESPONSE.v2023.1.Hs.tsv",
+                            stringsAsFactors = FALSE, row.names = 1, sep = "\t")
+reactome_ifng <- read.table("REACTOME_REGULATION_OF_IFNG_SIGNALING.v2023.1.Hs.tsv",
+                            stringsAsFactors = FALSE, row.names = 1, sep = "\t")
+hallmark_ifng <- unlist(strsplit(hallmark_ifng["GENE_SYMBOLS", 1], split = ","))
+reactome_ifng <- unlist(strsplit(reactome_ifng["GENE_SYMBOLS", 1], split = ","))
+ifng_genes <- unique(c(hallmark_ifng, reactome_ifng))
+ifng_genes <- ifng_genes[which(ifng_genes %in% rownames(scIFNg))]
+
+# get a second diff. expressed gene list since we may have removed
+# some of these genes in the one above since we have set FC/Percent expressed thresholds
+test2 <- lapply(c("D0", "D3", "D6"), function(x){
+    o <- FindMarkers(
+      subset(scIFNg, subset = (Day == x))@assays$RNA, 
+      cells.1 = Seurat::Cells(scIFNg)[which(scIFNg$Day == x & 
+                                              grepl("G", scIFNg$isotype_sterile))], 
+      cells.2 = Seurat::Cells(scIFNg)[which(scIFNg$Day == x & 
+                                              grepl("M", scIFNg$isotype_sterile))], 
+      group.by = "isotype_sterile", logfc.threshold = 0, min.pct = 0,
+      features = ifng_genes
+    )
+    o$gene <- rownames(o)
+    o$Day <- x
+    return(o)
+})
+test2 <- do.call("rbind", test2)
+test <- test[which(! test$gene %in% ifng_genes), ]
+test <- rbind(test, test2)
+
+# add column annotating IFNg involvement and impose colour
+test$gene_type <- sapply(test$gene, function(x){
+  if(x %in% reactome_ifng) return("Reactome Regulation of IFN-g signalling")
+  if(x %in% hallmark_ifng) return("Hallmark IFN-g response")
+  return("other genes")
+})
+test$gene_colour <- sapply(test$gene_type, function(x){
+  if(x == "other genes") return("grey")
+  if(x == "Reactome Regulation of IFN-g signalling") return("red")
+  if(x == "Hallmark IFN-g response") return("blue")
+})
+test$gene_colour <- "grey"
+cols <- test$gene_colour
+names(cols) <- test$gene_type
+# multiple test corrections separately for each timepoint
+test <- do.call("rbind", lapply(split(test, f = test$Day), function(x){
+  x$p_val_adj <- p.adjust(x$p_val)
+  return(x)
+}))
+```
+
+Volcano plot:
+
+```{r, fig.width=4, fig.height=12}
+library(EnhancedVolcano)
+volcano <- EnhancedVolcano(test, lab = test$gene, title = "", subtitle = "",
+                xlim = c(-0.75, 0.75), ylim = c(0, -log10(10e-100)),
+                x = 'avg_log2FC', colCustom = cols, 
+                y = 'p_val_adj') + geom_vline(xintercept = 0 , linetype = "dashed") +
+  geom_point(data = test[which(test$gene_type == "Hallmark IFN-g response"), ], 
+             aes(x = avg_log2FC, y = -log10(p_val_adj)),
+             colour = "blue") +
+  geom_point(data = test[which(test$gene_type == "Reactome Regulation of IFN-g signalling"), ], 
+             aes(x = avg_log2FC, y = -log10(p_val_adj)),
+             colour = "red") +
+  ggrepel::geom_text_repel(data = test[which(test$gene %in% c("IFNG", "IFNGR1", "JAK2", "STAT1", "PTPN6", "PTPN1", "IFNGR2", "JAK1", "PTPN11")), ], aes(x = avg_log2FC, y = -log10(p_val_adj), label = gene)) +
+  facet_wrap(~ Day, ncol = 1)
+volcano
+
+pdf("scIFNg_volcano.pdf", width = 4, height = 10)
+print(volcano)
+dev.off()
+```
+
+Compare percentage of cells positive for specific transcripts, between IgM sterile + and IgG sterile + cells:
+
+```{r}
+ifng_pos <- FetchData(scIFNg, c("Day", "Donor", reactome_ifng))
+ifng_pos <- reshape2::melt(ifng_pos, id.vars = c("Day", "Donor"), variable.name = "gene",
+                           value.name = "count")
+library(plyr)
+ifng_pos <- ddply(ifng_pos, c("Day", "Donor", "gene"), summarise,
+                  avg.exp = mean(count),
+                  pct = Seurat::PercentAbove(count, threshold = 0))
+
+# plot as classic Seurat Dotplot style:
+g_ifng_dotplot <- ggplot(ifng_pos[which(ifng_pos$gene %in% c("IFNGR1", "JAK2", "STAT1")), ], 
+       aes(x = Day, y = gene, size = pct, color = avg.exp)) + 
+    geom_point() + scale_color_viridis_c(option = "B", name = "Average expression") +
+    scale_size_continuous(breaks = c(0, 0.25, 0.5, 0.75, 1), range = c(0, 6), name = "Percent expressed") +
+    facet_wrap(~ Donor) + cowplot::theme_cowplot()
+g_ifng_dotplot
+
+pdf("scIFNg_IFNg_signaling_dotplot.pdf", width = 6.3, height = 2.8)
+print(g_ifng_dotplot)
+dev.off()
+
+```
+
+Or as a line plot:
+
+```{r, fig.width=5.5, fig.height=3.5}
+ifng_pos <- FetchData(scIFNg, c("Day", "Donor", "isotype_sterile", reactome_ifng))
+ifng_pos$isotype_sterile <- sapply(as.character(ifng_pos$isotype_sterile), substr, 1, 1)
+ifng_pos <- reshape2::melt(ifng_pos, id.vars = c("Day", "Donor", "isotype_sterile"),
+                           variable.name = "gene",
+                           value.name = "count")
+library(plyr)
+ifng_pos <- ddply(ifng_pos, c("Day", "Donor", "isotype_sterile", "gene"), summarise,
+                  avg.exp = mean(count),
+                  pct = Seurat::PercentAbove(count, threshold = 0))
+ifng_pos <- ifng_pos[which(ifng_pos$isotype_sterile %in% c("M", "G")), ]
+g_ifng_lineplot <- ggplot(ifng_pos[which(ifng_pos$gene %in% c("IFNGR1", "JAK2", "STAT1")), ], 
+       aes(x = Day, y = pct, group = interaction(Donor, isotype_sterile), 
+           color = isotype_sterile)) + 
+    geom_point() + geom_line() + 
+    scale_y_continuous(labels = scales::percent, name = "% cells positive",
+                       limits = c(0, 1)) +
+    scale_color_discrete(name = "", labels = c("IgG sterile +", "IgM+ IgG sterile -")) + 
+    facet_wrap(~ gene) + cowplot::theme_cowplot()
+g_ifng_lineplot
+
+pdf("scIFNg_IFNg_signaling_lineplot.pdf", width = 5.5, height = 3.5)
+print(g_ifng_lineplot)
+dev.off()
+```
+
+```{r}
+ggpubr::compare_means(
+  pct ~ isotype_sterile, group.by = c("Day", "gene"), method = "t.test",
+  data = ifng_pos[which(ifng_pos$gene %in% c("IFNGR1", "JAK2", "STAT1")), ]
+)
+```
+

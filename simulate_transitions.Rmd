@@ -1,0 +1,179 @@
+---
+title: "Simulation to assess the effect of number of transitions on MSM estimation"
+output: html_notebook
+---
+
+```{r}
+library(Seurat)
+library(splatter)
+library(sciCSR, quietly = TRUE)
+```
+
+One question on the robustness of the method is: how many observations are needed for the MSM estimation to pick up the states and correctly identify transitions between them?
+
+The way to answer this is, generate a synthetic dataset of many cells over a few states and fit a MSM. Then downsample the number of cells in each state and fit MSM on the downsampled data; compare the MSM (or the corresponding flux estimates) to the 'ground-truth'.
+
+# Description
+
+Here we simulate a three-state process where cells are in any one of these **three** states: IgM, IgG1, IgA1; each state has an equal number ($n$) of cells. $n$ is the only variable in the simulation.
+
+Preparation of the dataset:
+
+1. **Simulate gene counts**: the gene counts serve to build the graph that describes the structure of three-state mixture of cells. The graph is used as the basis of the transition matrix estimation using cellrank (the productive/sterile transcripts are added as a bias to add directionality to the graph). Use the splatter package and the the Stewart et al 'Pure' dataset as input; splatter will simulate gene counts with distribution similar to the 'Pure' dataset.
+
+Simulate a three-group (or 'state') mixture with 5,000 cells in each state - this is the ground-truth, we are downsampling from this ground truth.
+
+2. **Assign productive/sterile counts**: For each cell:
+
+* assign `furthest_jc` = the corresponding state in MSM
+* assign `total_ic` = a random sample from Naive/DN3/DN1 in Stewart et al.
+
+3. Estimate a transition matrix using cellrank and fit TPT specifying membership of the three states. Compare resulting TPT fluxes.
+
+
+```{r}
+# read in Pure and exploratory study
+pure <- readRDS("scPure2_Pure1Integrated_noPC_IGHC_metacells.rds")
+weights <- readRDS("scPure-HB6_KingTonsil_IGHC_NMF-combined.rds")@fit@H
+weights <- weights[1, grepl("^[AGCT]", colnames(weights))]
+weights <- 1 - (weights - min(weights, na.rm = TRUE)) / abs(diff(range(weights), na.rm = TRUE))
+weights <- list(
+  weights[Cells(pure)[which(pure$transfer_label == "Naive")]],
+  weights[Cells(pure)[which(pure$transfer_label %in% c("C-mem1", "C-mem2"))]],
+  weights[Cells(pure)[which(pure$transfer_label == "DN1")]]
+)
+weights <- lapply(weights, function(x) unname(x[!is.na(x)]))
+DimPlot(pure, label = TRUE, group.by = "transfer_label")
+```
+
+```{r}
+DotPlot(pure, features = c("IGHE-S", "IGHG1-S", "IGHA1-S", "IGHM-S", "IGHE-P",  "IGHG1-P", "IGHA1-P", "IGHM-P"), assay = "IGHC", group.by = "transfer_label") + RotatedAxis()
+```
+
+```{r}
+pure_states <- list(
+  subset(pure, subset = (transfer_label == "Naive"))@assays$RNA@counts,
+  subset(pure, subset = (transfer_label %in% c("C-mem1", "C-mem2")))@assays$RNA@counts,
+  subset(pure, subset = (transfer_label == "DN1"))@assays$RNA@counts
+)
+# select only the variable genes
+variable_genes <- VariableFeatures(pure)
+
+```
+
+```{r}
+pure_states_params <- splatter::splatEstimate(as.matrix(pure@assays$RNA@counts[variable_genes, sample(1:length(Cells(pure)), 5000)]))
+
+# for each population simulate 2000 genes (similar to the number of variable genes)
+# and 10000 cells
+pure_synthetic <- splatter::splatSimulate(pure_states_params, 
+                                          nGenes = 2000, batchCells = rep(10000, 3))
+
+pure_synthetic <- as.Seurat(pure_synthetic, data = NULL)
+pure_synthetic$isotype <- pure_synthetic$Batch
+pure_synthetic$isotype <- replace(pure_synthetic$isotype, 
+                                  which(pure_synthetic$isotype == "Batch1"), "M")
+pure_synthetic$isotype <- replace(pure_synthetic$isotype, 
+                                  which(pure_synthetic$isotype == "Batch2"), "G1")
+pure_synthetic$isotype <- replace(pure_synthetic$isotype, 
+                                  which(pure_synthetic$isotype == "Batch3"), "A1")
+
+# randomly sample csr potential from nmf weights
+set.seed(2341)
+csr_pot <- sapply(pure_synthetic$Batch, function(b){
+  x <- as.numeric(gsub("Batch", "", b))
+  sample(weights[[x]], size = 1)
+})
+pure_synthetic <- AddMetaData(pure_synthetic, csr_pot, col.name = "csr_pot")
+
+save("pure_synthetic", "pure_states_params", file="simulate_transitions.RData")
+```
+
+```{r}
+load("simulate_transitions.RData")
+source("cellrank_tpt.R")
+```
+
+```{r}
+getTPT <- function(n_cells)
+{
+  set.seed(12345)
+  cell_sampled <- list(
+    sample(Cells(pure_synthetic)[which(pure_synthetic$isotype == "M")], n_cells),
+    sample(Cells(pure_synthetic)[which(pure_synthetic$isotype == "G1")], n_cells),
+    sample(Cells(pure_synthetic)[which(pure_synthetic$isotype == "A1")], n_cells)
+  )
+  obj <- subset(pure_synthetic, cells = unlist(cell_sampled))
+  convertSeuratToH5ad(obj, assays = c("originalexp"), 
+                    paste0("/media/josephn/Seagate4TB/GLT_datasets/simulate_transitions_n-cell", n_cells, ".h5ad"))
+  g_csr <- fitTransitionModel(
+    anndata_file = paste0("/media/josephn/Seagate4TB/GLT_datasets/simulate_transitions_n-cell", n_cells, "_assay-originalexp.h5ad"), 
+    conda_env = "scverse", mode = "pseudotime", pseudotime_key = "csr_pot"
+  )
+  tpt_isotype <- fitTPT(
+    anndata_file = paste0("/media/josephn/Seagate4TB/GLT_datasets/simulate_transitions_n-cell", n_cells, "_assay-originalexp.h5ad"), 
+    conda_env = "scverse", CellrankObj = g_csr, group.cells.by = "isotype",
+    source_state = 'M', target_state = 'A1'
+  )
+  return( tpt_isotype )
+}
+```
+
+```{r}
+tpt_sampled <- lapply(c(5000, 1000, 500, 100, 50, 10), function(x){
+  getTPT(x)
+})
+```
+
+```{r}
+tpt_sampled <- readRDS("TPT_simulated_transitions.rds")
+
+sampled_gross_flux <- lapply(tpt_sampled, function(x) reshape2::melt(x$gross_flux, varnames = c("from", "to"), value.name = "gross_flux"))
+significance <- lapply(tpt_sampled, function(x) reshape2::melt(x$significance, varnames = c("from", "to"), value.name = "pvalue"))
+
+sampled_gross_flux[[1]]$n_cells <- 5000
+sampled_gross_flux[[2]]$n_cells <- 1000
+sampled_gross_flux[[3]]$n_cells <- 500
+sampled_gross_flux[[4]]$n_cells <- 100
+sampled_gross_flux[[5]]$n_cells <- 50
+sampled_gross_flux[[6]]$n_cells <- 10
+significance[[1]]$n_cells <- 5000
+significance[[2]]$n_cells <- 1000
+significance[[3]]$n_cells <- 500
+significance[[4]]$n_cells <- 100
+significance[[5]]$n_cells <- 50
+significance[[6]]$n_cells <- 10
+
+significance <- do.call("rbind", significance)
+significance$from <- factor(significance$from,
+                            levels = c("M", "G1", "A1"))
+significance$to <- factor(significance$to,
+                          levels = c("M", "G1", "A1"))
+significance$n_cells <- factor(significance$n_cells,
+                               levels = c(5000, 1000, 500, 100, 50, 10),
+                               labels = paste0(c(5000, 1000, 500, 100, 50, 10), " cells"))
+sampled_gross_flux <- do.call("rbind", sampled_gross_flux)
+sampled_gross_flux$from <- factor(sampled_gross_flux$from,
+                                  levels = c("M", "G1", "A1"))
+sampled_gross_flux$to <- factor(sampled_gross_flux$to,
+                                levels = c("M", "G1", "A1"))
+sampled_gross_flux$n_cells <- factor(sampled_gross_flux$n_cells,
+                                     levels = c(5000, 1000, 500, 100, 50, 10),
+                                     labels = paste0(c(5000, 1000, 500, 100, 50, 10), " cells"))
+
+sampled_gross_flux <- merge(sampled_gross_flux, significance)
+sampled_gross_flux$signif <- -log(sampled_gross_flux$pvalue)
+sampled_gross_flux <- sampled_gross_flux[sampled_gross_flux$gross_flux > 0, ]
+
+library(ggplot2)
+svg("/media/josefng/Seagate4TB/GLT_datasets/simulate_transitions_flux.svg", width = 7, height = 4.3)
+ggplot(sampled_gross_flux, aes(x = from, y = to, fill = gross_flux)) +
+  geom_tile() +  scale_fill_viridis_c(name = "% gross flux") + 
+  geom_text(aes(label = round(gross_flux, 1), colour = (gross_flux < 50))) +
+  scale_colour_manual(values = c("FALSE" = "black", "TRUE" = "white"),
+                      guide = "none") +
+  scale_x_discrete(drop = FALSE) + scale_y_discrete(drop = FALSE) +
+  cowplot::theme_cowplot() + facet_wrap(~ n_cells, scales = "free")
+dev.off()
+```
+

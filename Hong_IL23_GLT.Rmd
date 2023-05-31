@@ -1,0 +1,858 @@
+---
+title: "Hong et al IL23 knockout"
+output: html_notebook
+---
+
+Hong et al dataset on mice with the p19 component of IL23 knocked-out versus WT mice. Shown to decrease CSR and decrease the proportion of IgG2b in both transcriptome and serum antibody levels.
+
+Paper [here](https://doi.org/10.4049/jimmunol.2000280)
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE, fig.path = "Hong_IL23_figures/",
+                      dev = "svg")
+library(Seurat)
+library(plyr)
+library(ggplot2)
+library(sciCSR)
+```
+
+```{r, eval=FALSE}
+hong <- Read10X('aggregated/outs/count/filtered_feature_bc_matrix/')
+
+# merge all Ig[hkl][vdj] into 'IGVDJ'
+vdj <- colSums(as.matrix(hong[rownames(hong)[grepl("^Ig[hkl][vdj][0-9]", rownames(hong))], ]))
+# Remove individual genes from the matrix
+hong <- hong[-which(grepl("^Ig[hkl][vdj][0-9]", rownames(hong))), ]
+
+hong <- rbind(hong, vdj)
+rownames(hong)[nrow(hong)] <- c("Ig-vdj")
+
+# calculate percent.mt and then remove mitochondrial genes
+# definition: ^MT- or MTRNR2L8 MTRNR2L12
+# this is for SCTransform
+
+hong <- CreateSeuratObject( hong, project = 'Hong_IL23_IgG2b', 
+                            min.cells = 3, min.features = 200 )
+hong[["Sample"]] <- sapply(Cells(hong), function(x){
+  o <- paste0("S", unlist(strsplit(x, split = "-"))[2])
+  if(o %in% c("S1", "S2", "S3")){
+    gsub("S", "p19kd_", o)
+  } else {
+    gsub("S", "WT_", o)
+  }
+})
+hong[["Status"]] <- sapply(hong$Sample, function(x){
+  if(grepl("p19kd", x)) return("IL23-/-") else return("WT")
+})
+
+```
+
+```{r, eval=FALSE}
+# normalise data, find variable features, PCA & UMAP
+hong <- normalise_dimreduce( hong, run_harmony = FALSE )
+saveRDS(hong, 'Hong_IL23.rds')
+```
+
+```{r, eval=FALSE, fig.width=4, fig.height=3.5}
+DimPlot(hong, label = TRUE)
+```
+
+```{r, eval=FALSE, fig.width=7, fig.height=7}
+FeaturePlot(hong, features = c("Cd19", "Ms4a1", "Prdm1", "Cd3e", "Cd14", "Nkg7", "Cst3"))
+```
+
+```{r, eval=FALSE}
+hong <- readRDS("Hong_IL23.rds")
+```
+
+### merge the VDJ data onto the Seurat object
+
+```{r, eval=FALSE}
+vdj <- "aggregated/outs/vdj_b/filtered_contig_annotations.csv"
+vdj <- read.csv(vdj, stringsAsFactors = FALSE)
+
+vquest <- "aggregated/outs/vdj_b/IMGT_HighV-Quest/vquest_airr.tsv"
+vquest <- read.table(vquest, sep = "\t", stringsAsFactors = FALSE, header = TRUE)
+
+vdj <- merge(vdj, vquest[, c("sequence_id", "v_identity")],
+             by.x = "contig_id", by.y = "sequence_id", all.x = TRUE, all.y = FALSE,
+             sort = FALSE)
+```
+
+```{r, eval=FALSE}
+# 'collapseBCR' annotate for each cell whether you see > 1H and/or 1L
+collapsed <- collapseBCR(vdj, format = "10X", full.table = TRUE)
+
+# the full table is accessible as $full.table like so:
+collapsed_slim <- collapsed$collapsed.table
+
+colnames(collapsed_slim)[which(colnames(collapsed_slim) == "donor")] <- "sample_name"
+# this add Seurat Object metadata to the VDJ table
+collapsed_slim <- AddCellMetaToVDJ(
+  vdj = collapsed_slim,
+  SeuratObj = hong,
+  metadata_col = c("Status"),
+  cell_specific = c(FALSE),
+  sample_id_col = "Sample"
+)
+
+colnames(collapsed$full.table)[which(colnames(collapsed$full.table) == "donor")] <- "sample_name"
+# again same for the full version
+collapsed <- AddCellMetaToVDJ(
+  vdj = collapsed$full.table,
+  SeuratObj = hong,
+  metadata_col = c("Status"),
+  cell_specific = c(FALSE),
+  sample_id_col = "Sample"
+)
+
+# add the VDJ data frame to Seurat Object
+hong <- combineBCR(
+  collapsed_slim, hong, sample_id_col = "Sample",
+  keep_columns = c("v_gene", "d_gene", "j_gene", "c_gene", "v_identity", "full_length", 
+                   "productive", "cdr3", "cdr3_nt", "reads", "umis")
+)
+
+DimPlot(hong, split.by = "bcr_type", ncol = 3)
+```
+
+```{r, eval=FALSE, fig.width=4, fig.height=3}
+# subset b cells following the mehods section of the paper
+hong_b <- hong[, Cells(hong)[which(!is.na(hong$bcr_type))]]
+hong_b <- subset(hong_b, subset = (Ms4a1 > 0 & Cd19 > 0))
+hong_b <- normalise_dimreduce(hong_b, run_harmony = FALSE)
+DimPlot(hong_b, label = TRUE)
+saveRDS(hong_b, "Hong_IL23_Bcells.rds")
+```
+
+
+```{r, eval=FALSE}
+# making the sampled subset for scicsr package example
+hong <- "Hong_IL23.rds"
+hong <- readRDS(hong)
+hong_b <- "Hong_IL23_Bcells.rds"
+hong_b <- readRDS(hong_b)
+set.seed(1234)
+non_b <- Cells(hong)[which(! Cells(hong) %in% Cells(hong_b))] # the non-b cells
+
+#--------------------------------------
+# generating the toy dataset for the package
+
+# first get a list of 4000 cells consisting all B cells and 
+# boosting up to 4000 with the non-Bcells
+sampled <- c(Cells(hong_b), sample(non_b, 4000-length(Cells(hong_b))))
+# sample 3,000 from this
+set.seed(1234)
+sampled <- sample(sampled, 3000)
+hong_b <- FindVariableFeatures(hong_b, nfeatures = 200)
+hong_sampled <- subset(hong, cells = sampled, 
+                       features = c(VariableFeatures(hong_b), "Cd19", "Ms4a1")) # variably expressed genes in the B cell subset
+saveRDS(hong_sampled, "/home/josephn/Documents/sciCSR/inst/extdata/hong_sampled.rds")
+```
+
+
+```{r}
+hong_b <- readRDS("Hong_IL23_Bcells.rds")
+```
+
+```{r, fig.width=15, fig.height=5}
+all_markers <- FindAllMarkers(hong_b, only.pos = TRUE, logfc.threshold = 0.6)
+all_markers <- lapply(split(all_markers, f = all_markers$cluster), function(tb){
+  tb <- tb[order(tb$avg_log2FC, decreasing = TRUE), ]
+  tb <- tb[1:min(10, nrow(tb)), ]
+  tb$gene
+}) 
+all_markers <- unique(unlist(all_markers))
+all_markers <- all_markers[!is.na(all_markers)]
+DotPlot(hong_b, features = all_markers) + RotatedAxis()
+```
+
+```{r}
+c_genes <- c("Ighm", "Ighd", "Ighg3", "Ighg1", "Ighg2b", "Ighg2c", "Ighe", "Igha")
+# at this point we are not differentiating between productive and sterile IgH transcripts
+cowplot::plot_grid(
+  DotPlot(hong_b[, which(hong_b$Status == "IL23-/-")], features = c_genes) + ggtitle("IL23-/-") + RotatedAxis(),
+  DotPlot(hong_b[, which(hong_b$Status == "WT")], features = c_genes) + ggtitle("WT") + RotatedAxis(),
+  nrow = 1, align = "h", axis = "tb" 
+)
+```
+
+```{r}
+hong_b[["percent.IGV"]] <- PercentageFeatureSet(hong_b, pattern = "^Ig-vdj")
+VlnPlot(hong_b, features = c("percent.mt", "percent.IGV"), pt.size = 0)
+```
+
+```{r}
+ggplot(hong_b@meta.data) + geom_bar(aes(y = IGH_c_gene, fill = Status)) +
+  ylab("") + xlab("Number of cells expressing isotype in VDJseq") +
+  cowplot::theme_cowplot()
+```
+
+```{r, eval=FALSE}
+bamfiles <- c('S1/outs/per_sample_outs/S1/count/sample_alignments.bam',
+              'S2/outs/per_sample_outs/S2/count/sample_alignments.bam',
+              'S3/outs/per_sample_outs/S3/count/sample_alignments.bam',
+              'S4/outs/per_sample_outs/S4/count/sample_alignments.bam',
+              'S5/outs/per_sample_outs/S5/count/sample_alignments.bam')
+data("mouse_definitions")
+hong_IGH <- lapply(bamfiles, function(bamfile){
+  cat(paste0(bamfile, " ...\n"))
+  out <- getIGHmapping(bamfile, mouse_definitions)
+  out2 <- getIGHreadType(out$read_count)
+  out3 <- summariseIGHreads(out2, mouse_definitions)
+  sample_name <- unlist(strsplit(dirname(bamfile), split = "/"))[1]
+  sample_name <- gsub("S", "", sample_name)
+  rownames( out3 ) <- paste0(gsub("-1", "", rownames( out3 )), "-", sample_name)
+  out3
+})
+hong_IGH <- do.call("rbind", hong_IGH)
+save("hong_IGH", file="Hong_IL23_IGHC-counts.RData")
+```
+
+```{r, eval=FALSE}
+load("Hong_IL23_IGHC-counts.RData")
+hong_IGH <- hong_IGH[ which( rownames(hong_IGH) %in% Cells(hong_b) ), ] # only cells surviving in the dataset
+hong_b <- mergeIgHCountsToSeurat( hong_IGH, hong_b, assay_name = "IGHC" )
+hong_b <- NormalizeData( hong_b, assay = "IGHC" )
+```
+
+Examine productive/sterile transcript expression with a dot plot:
+
+```{r, eval=FALSE, fig.width=9, fig.height=5}
+genes <- c(rownames(hong_b@assays$IGHC)[grepl("-P$", rownames(hong_b@assays$IGHC))],
+           rownames(hong_b@assays$IGHC)[grepl("-S$", rownames(hong_b@assays$IGHC))])
+
+cowplot::plot_grid(
+  DotPlot(hong_b[, which(hong_b$Status == "IL23-/-")], 
+          features = genes, assay = "IGHC") + ggtitle("IL23-/-") + RotatedAxis(),
+  DotPlot(hong_b[, which(hong_b$Status == "WT")], 
+          features = genes, assay = "IGHC") + ggtitle("WT") + RotatedAxis(),
+  nrow = 1, align = "h", axis = "tb" 
+)
+
+```
+
+```{r, eval=FALSE}
+saveRDS(hong_b, "Hong_IL23_Bcells_IGHC.rds")
+```
+
+```{r}
+cowplot::plot_grid(
+  DimPlot(hong_b, label = TRUE),
+  FeaturePlot(hong_b, features = c("Ighm", "percent.IGV")),
+  nrow = 1, align = "h", axis = "tb", rel_widths = c(1, 2)
+)
+```
+
+Cluster 6 = most IgM+, Cluster 9 = likely plasmablast. Useful for fitting TPT later:
+
+# Infer transitions
+
+```{r}
+hong <- readRDS("Hong_IL23_Bcells_IGHC.rds")
+hong <- getCSRpotential(hong, c_gene_anno_name = "IGH_c_gene", 
+                        reference_based = "mouse")
+# get SHM frequency (= 1 - IGH_v_identity)
+hong <- getSHM(hong, v_identity_anno_name = "IGH_v_identity")
+hong$Sample <- unname(sapply(hong$Sample, function(x){
+  paste0("S", unlist(strsplit(x, split = "_"))[2])
+}))
+```
+
+```{r}
+# remove cluster 8 (98.2% cells Cd3e positive)
+convertSeuratToH5ad(subset(hong, subset = (seurat_clusters != "8")), 
+                    assays = c("RNA", "IGHC"),
+                    "Hong_IL23_Bcells_IGHC.h5ad")
+
+# split into wt and kd
+splitAnnData(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/Hong_IL23_Bcells_IGHC_assay-RNA.h5ad",
+  split.by = "Status", levels = c("WT", "IL23-/-"), conda_env = "scicsr"
+)
+
+# try merging loom files
+combineLoomFiles(
+  loom_files = c("/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/S1/velocyto/S1.loom",
+                 "/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/S2/velocyto/S2.loom",
+                 "/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/S3/velocyto/S3.loom",
+                 "/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/S4/velocyto/S4.loom",
+                 "/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/S5/velocyto/S5.loom"),
+  new_loom_filename = '/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/velocyto_combined_loom.loom', 
+  SeuratObj = hong, sample_names = c("S1", "S2", "S3", "S4", "S5"),
+  seurat_sample_column = "Sample"
+)
+
+# add velocyto loom data into AnnData
+mergeVelocytoWithGEX(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/Hong_IL23_Bcells_IGHC_assay-RNA.h5ad",
+  loom_file = '/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/velocyto_combined_loom.loom',
+  anndata_out_filename = '/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/Hong_IL23_Bcells_IGHC_assay-RNA_scVelo.h5ad',
+  conda_env = 'scicsr'
+)
+# split into wt and kd
+splitAnnData(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/Hong_IL23_Bcells_IGHC_assay-RNA_scVelo.h5ad",
+  split.by = "Status", levels = c("WT", "IL23-/-"), conda_env = "scicsr"
+)
+run_scVelo(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/Hong_IL23_Bcells_IGHC_assay-RNA_scVelo_WT.h5ad",
+  anndata_out_filename = "/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/Hong_IL23_Bcells_IGHC_assay-RNA_scVelo_WT.h5ad",
+  conda_env = "scicsr"
+)
+run_scVelo(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/Hong_IL23_Bcells_IGHC_assay-RNA_scVelo_IL23--.h5ad",
+  anndata_out_filename = "/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/Hong_IL23_Bcells_IGHC_assay-RNA_scVelo_IL23--.h5ad",
+  conda_env = "scicsr"
+)
+```
+
+Now run cellrank and fit TPT separately on:
+
+* WT: transitions estimated using (1) RNA velocity (2) CSR (3) SHM
+* KD: transitions estimated using (1) RNA velocity (2) CSR (3) SHM
+
+
+```{r}
+#----------------------------------
+# fit transitions based on velocity
+g_ko_velo <- fitTransitionModel(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/Hong_IL23_Bcells_IGHC_assay-RNA_scVelo_IL23--.h5ad",
+  conda_env = "scicsr", mode = "velocity"
+)
+tpt_ko_velo <- fitTPT(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/Hong_IL23_Bcells_IGHC_assay-RNA_scVelo_IL23--.h5ad",
+  conda_env = "scicsr", CellrankObj = g_ko_velo, group.cells.by = "seurat_clusters",
+  source_state = '6', target_state = '9'
+)
+g_wt_velo <- fitTransitionModel(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/Hong_IL23_Bcells_IGHC_assay-RNA_scVelo_WT.h5ad",
+  conda_env = "scicsr", mode = "velocity"
+)
+tpt_wt_velo <- fitTPT(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/Hong_IL23_Bcells_IGHC_assay-RNA_scVelo_WT.h5ad",
+  conda_env = "scicsr", CellrankObj = g_wt_velo, group.cells.by = "seurat_clusters",
+  source_state = '6', target_state = '9'
+)
+
+#----------------------------------
+# fit transitions based on csr
+g_ko_csr <- fitTransitionModel(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/Hong_IL23_Bcells_IGHC_assay-RNA_scVelo_IL23--.h5ad",
+  conda_env = "scicsr", mode = "pseudotime", pseudotime_key = "csr_pot"
+)
+tpt_ko_csr <- fitTPT(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/Hong_IL23_Bcells_IGHC_assay-RNA_scVelo_IL23--.h5ad",
+  conda_env = "scicsr", CellrankObj = g_ko_csr, group.cells.by = "seurat_clusters",
+  source_state = '6', target_state = '9'
+)
+g_wt_csr <- fitTransitionModel(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/Hong_IL23_Bcells_IGHC_assay-RNA_scVelo_WT.h5ad",
+  conda_env = "scicsr", mode = "pseudotime", pseudotime_key = "csr_pot"
+)
+tpt_wt_csr <- fitTPT(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/Hong_IL23_Bcells_IGHC_assay-RNA_scVelo_WT.h5ad",
+  conda_env = "scicsr", CellrankObj = g_wt_csr, group.cells.by = "seurat_clusters",
+  source_state = '6', target_state = '9'
+)
+
+#----------------------------------
+# fit transitions based on shm
+g_ko_shm <- fitTransitionModel(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/Hong_IL23_Bcells_IGHC_assay-RNA_scVelo_IL23--.h5ad",
+  conda_env = "scicsr", mode = "pseudotime", pseudotime_key = "shm"
+)
+tpt_ko_shm <- fitTPT(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/Hong_IL23_Bcells_IGHC_assay-RNA_scVelo_IL23--.h5ad",
+  conda_env = "scicsr", CellrankObj = g_ko_shm, group.cells.by = "seurat_clusters",
+  source_state = '6', target_state = '9'
+)
+g_wt_shm <- fitTransitionModel(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/Hong_IL23_Bcells_IGHC_assay-RNA_scVelo_WT.h5ad",
+  conda_env = "scicsr", mode = "pseudotime", pseudotime_key = "shm"
+)
+tpt_wt_shm <- fitTPT(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/Hong_IL23_Bcells_IGHC_assay-RNA_scVelo_WT.h5ad",
+  conda_env = "scicsr", CellrankObj = g_wt_shm, group.cells.by = "seurat_clusters",
+  source_state = '6', target_state = '9'
+)
+save(list = c("g_ko_velo", "g_wt_velo", "tpt_ko_velo", "tpt_wt_velo",
+              "g_ko_csr", "g_wt_csr", "tpt_ko_csr", "tpt_wt_csr",
+              "g_ko_shm", "g_wt_shm", "tpt_ko_shm", "tpt_wt_shm"),
+     file = "all_tpt_models.rda")
+```
+
+```{r, fig.width=9, fig.height=3.5}
+svg("Hong_IL23_figures/Hong_FeaturePlot.svg", width = 9, height = 3.5)
+FeaturePlot(subset(hong, subset = (seurat_clusters != "8")), 
+            features = c("Ighm", "Aicda", "percent.IGV"), ncol = 3, 
+            cols = c("grey", "purple"))
+dev.off()
+```
+
+# Compare transitions inferred using RNA velocity/CSR/SHM
+
+First properly annotate the clusters
+
+```{r}
+hong <- subset(hong, subset = (seurat_clusters != "8"))
+hong <- RenameIdents(
+  hong,
+  "0" = "LZ 1", "1" = "DZ 1", "2" = "LZ 2",
+  "3" = "Myc+", "4" = "DZ 2", "5" = "Memory",
+  "6" = "Memory IgM-hi", "7" = "Follicular", "9"= "Plasmablast"
+)
+Idents(hong) <- factor(Idents(hong), levels = c("LZ 1", "LZ 2", "DZ 1", "DZ 2",
+                                                "Myc+", "Memory", "Memory IgM-hi",
+                                                "Follicular", "Plasmablast"))
+hong$clusters_named <- Idents(hong)
+```
+
+Sample states from the Markov models defined using velocity/CSR/SHM
+
+```{r}
+#-----------------------------
+# compare the transition matrices
+wt_comparisons <- compareTransitionMatrices(
+  matrix_list = list(g_wt_velo$transition_matrix,
+                     g_wt_csr$transition_matrix,
+                     g_wt_shm$transition_matrix),
+  SeuratObj = hong, cells = g_wt_csr$CellID,
+  group.by = 'clusters_named', distance_metric = 'KL'
+)
+print(wt_comparisons$distance)
+ko_comparisons <- compareTransitionMatrices(
+  matrix_list = list(g_ko_velo$transition_matrix,
+                     g_ko_csr$transition_matrix,
+                     g_ko_shm$transition_matrix),
+  SeuratObj = hong, cells = g_ko_csr$CellID,
+  group.by = 'clusters_named', distance_metric = 'KL'
+)
+print(ko_comparisons$distance)
+save(list = c("wt_comparisons", "ko_comparisons"), file = "sampled_traj.RData")
+```
+
+```{r}
+# get the actual cells being sampled in the Markov chains
+get_markov_sequence <- function (matrix_list, cells, n_realisation = 1000, n_step = 1000) 
+{
+    mc_list <- list()
+    for (i in 1:length(matrix_list)) {
+        mc_list <- c(mc_list, new("markovchain", states = cells, 
+            byrow = TRUE, transitionMatrix = matrix_list[[i]], 
+            name = paste0("matrix", i)))
+    }
+    sampled_transitions <- lapply(1:length(mc_list), function(y) {
+        message(paste0("Sampling realisations from Markov chain ", 
+            y, " ..."))
+        o <- lapply(1:n_realisation, function(x) {
+            set.seed(1000 + x)
+            markovchain::markovchainSequence(n_step, mc_list[[y]])
+        })
+        return(o)
+    })
+    names(sampled_transitions) <- paste0("mc_", 1:length(sampled_transitions))
+    return(sampled_transitions)
+}
+wt_comparisons_sequences <- get_markov_sequence(
+  matrix_list = list(g_wt_velo$transition_matrix,
+                     g_wt_csr$transition_matrix,
+                     g_wt_shm$transition_matrix),
+  cells = g_wt_csr$CellID
+)
+ko_comparisons_sequences <- get_markov_sequence(
+  matrix_list = list(g_ko_velo$transition_matrix,
+                     g_ko_csr$transition_matrix,
+                     g_ko_shm$transition_matrix),
+  cells = g_ko_csr$CellID
+)
+wt_comparisons_sequences <- lapply(wt_comparisons_sequences, function(x){
+  return(table(unlist(x)))
+})
+ko_comparisons_sequences <- lapply(ko_comparisons_sequences, function(x){
+  return(table(unlist(x)))
+})
+save(list = c("wt_comparisons_sequences", "ko_comparisons_sequences",
+              "wt_comparisons", "ko_comparisons"), file = "markovchain_traj.RData")
+
+# Then map back to the Seurat object
+# retrieve UMAP coordinates - I want to plot a contour map
+# showing the frequency of visiting each state in the UMAP
+wt <- subset(hong, subset = (Status == "WT"))
+ko <- subset(hong, subset = (Status == "IL23-/-"))
+wt_comparisons_traj <- lapply(wt_comparisons_sequences, function(x){
+  cells_sampled <- names(x)
+  x <- as.numeric(x); names(x) <- cells_sampled
+  coords <- FetchData(wt, c("UMAP_1", "UMAP_2"))
+  oo <- do.call("rbind", lapply(cells_sampled, function(y){
+    o <- coords[rep(y, x[y]), ] 
+    rownames(o) <- NULL
+    return(o)
+  }))
+  set.seed(1234)
+  oo <- oo[sample(1:nrow(oo), 1000), ]
+  return(oo)
+})
+ko_comparisons_traj <- lapply(ko_comparisons_sequences, function(x){
+  cells_sampled <- names(x)
+  x <- as.numeric(x); names(x) <- cells_sampled
+  coords <- FetchData(ko, c("UMAP_1", "UMAP_2"))
+  oo <- do.call("rbind", lapply(cells_sampled, function(y){
+    o <- coords[rep(y, x[y]), ] 
+    rownames(o) <- NULL
+    return(o)
+  }))
+  set.seed(1234)
+  oo <- oo[sample(1:nrow(oo), 1000), ]
+  return(oo)
+})
+
+# plot the actual umap with contour using geom_density
+svg("markovchain_traj_umap.svg", width = 7.5, height= 5.5)
+cowplot::plot_grid(
+  DimPlot(wt) + geom_density_2d(
+    data = wt_comparisons_traj$mc_1, aes(x = UMAP_1, y = UMAP_2), 
+    colour = "grey40", alpha = 0.6
+  ) + ggtitle("WT, RNA velocity") + 
+    theme(legend.position = "none", axis.line = element_blank(),
+          axis.ticks = element_blank(),
+          axis.text = element_blank(), axis.title = element_blank()),
+  DimPlot(wt) + geom_density_2d(
+    data = wt_comparisons_traj$mc_2, aes(x = UMAP_1, y = UMAP_2), 
+    colour = "grey40", alpha = 0.6
+  ) + ggtitle("WT, CSR") + 
+    theme(legend.position = "none", axis.line = element_blank(),
+          axis.ticks = element_blank(),
+          axis.text = element_blank(), axis.title = element_blank()),
+  DimPlot(wt) + geom_density_2d(
+    data = wt_comparisons_traj$mc_3, aes(x = UMAP_1, y = UMAP_2), 
+    colour = "grey40", alpha = 0.6
+  ) + ggtitle("WT, SHM") + 
+    theme(legend.position = "none", axis.line = element_blank(),
+          axis.ticks = element_blank(),
+          axis.text = element_blank(), axis.title = element_blank()),
+  DimPlot(ko) + geom_density_2d(
+    data = ko_comparisons_traj$mc_1, aes(x = UMAP_1, y = UMAP_2), 
+    colour = "grey40", alpha = 0.6
+  ) + ggtitle("IL23-/-, RNA velocity") + 
+    theme(legend.position = "none", axis.line = element_blank(),
+          axis.ticks = element_blank(),
+          axis.text = element_blank(), axis.title = element_blank()),
+  DimPlot(ko) + geom_density_2d(
+    data = ko_comparisons_traj$mc_2, aes(x = UMAP_1, y = UMAP_2), 
+    colour = "grey40", alpha = 0.6
+  ) + ggtitle("IL23-/-, CSR") + 
+    theme(legend.position = "none", axis.line = element_blank(),
+          axis.ticks = element_blank(),
+          axis.text = element_blank(), axis.title = element_blank()),
+  DimPlot(ko) + geom_density_2d(
+    data = ko_comparisons_traj$mc_3, aes(x = UMAP_1, y = UMAP_2), 
+    colour = "grey40", alpha = 0.6
+  ) + ggtitle("IL23-/-, SHM") + 
+    theme(legend.position = "none", axis.line = element_blank(),
+          axis.ticks = element_blank(),
+          axis.text = element_blank(), axis.title = element_blank()),
+  nrow = 2, ncol = 3, align = "hv", axis = "tblr"
+)
+dev.off()
+```
+
+Detail showing of the markers to justify the naming of clusters
+
+```{r, fig.width=11, fig.height = 4.5}
+svg("Hong_IL23_figures/hong_markers_all.svg", width = 12, height= 4)
+DotPlot(
+  hong, features = unique(c(# https://doi.org/10.1038/s41590-020-0713-6
+                            c("Macf1", "Fcer2a", "Il2ar", "Lrrk2", "Hist1h2ap", "Top2a",
+                              "Top1", "Tgfbr1", "Mndal", "Zeb2", "Ccr6", "Pml", "Sell",
+                              "Dnmt1", "Cdc6", "Cenpf", "Cdc20", "Hmmr", "Mki67", "Ly6d",
+                              "Klf2", "Rpl30", "Ccnd2", "Nfkbia", "Cd83", "Icam1"),
+                            # https://doi.org/10.1016/j.it.2022.01.003
+                            "2810417H13Rik", 
+                            stringr::str_to_sentence(c("BCL6", "FAS", "CD38", "CCR6", 
+                                                       "BCL2", "MKI67", "HIST1H1B", 
+                                                       "CENPF", "CENPE", "INCENP",
+                                                       "HIST1H2AP", "TOP2A", "HIST1H1E",
+                                                       "HHEX", "TLE3", "ZEB2", "Bhlhe41",
+                                                       "Pml")), 
+                            # https://doi.org/10.1146/annurev-immunol-020711-075032
+                            c("Myc", "Ebi2", "Prdm1", "Cxcr4", "Junb", "Egr1", 
+                              "Egr2", "Egr3", "Batf")))) + 
+  RotatedAxis() + scale_color_viridis_c(option = "B", name = "Average Expression")
+dev.off()
+```
+
+```{r, fig.width=9, fig.height=9}
+# Add Cell Cycle Scores as additional feature to annotate the clusters
+hong <- CellCycleScoring(
+  hong, s.features = stringr::str_to_sentence(cc.genes.updated.2019$s.genes),
+  g2m.features = stringr::str_to_sentence(cc.genes.updated.2019$g2m.genes)
+)
+svg("Hong_IL23_figures/hong_markers.svg", width = 9, height = 9)
+cowplot::plot_grid(
+  cowplot::plot_grid(
+    DimPlot(hong, label = TRUE) + theme(legend.position = "none") + xlim(-6, 15),
+    NULL,
+    ncol = 2
+  ),
+  cowplot::plot_grid(
+    DotPlot(hong, features = c("Prdm1", "Sdc1", "Cd38", "Bcl2", "Bcl6", "Mki67", "Cd83", 
+                               "Cd86", "Cxcr4", "Dnmt1", "Myc", "Klf2", "Ly6d", "Zeb2", 
+                               "Hhex", "Tle3", "Ighm")) +
+      scale_color_viridis_c(option = "B", name = "Average Expression") +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "bottom"),
+    ggplot(ddply(reshape2::melt(FetchData(hong, c("clusters_named", 
+                                                  "S.Score", "G2M.Score")),
+                                id.vars = "clusters_named"),
+                 c("clusters_named", "variable"), summarise, value = mean(value)),
+           aes(x = variable, y = clusters_named, fill = value)) +
+      geom_tile() + 
+      scale_fill_viridis_c(name = "Cell cycle score") +
+      scale_x_discrete(label = c("S", "G2M"), name = "") + ylab("") +
+      cowplot::theme_cowplot() + 
+      theme(axis.text.y = element_blank(),
+            axis.text.x = element_text(angle = 45, hjust = 1)), 
+    ncol = 2, rel_widths = c(2.5, 1), align = "h", axis ="tb"
+  ),
+  nrow = 2
+)
+dev.off()
+```
+
+Quantify the difference between the CSR/SHM/Velocity inferred transitions using Kullback Leibler divergence:
+
+```{r, fig.width=4.5, fig.height=3.5}
+distances <- list(wt_comparisons$distance,
+                  ko_comparisons$distance)
+dimnames(distances[[1]]) <- list(c("WT_Velocity", "WT_CSR", "WT_SHM"),
+                                 c("WT_Velocity", "WT_CSR", "WT_SHM"))
+dimnames(distances[[2]]) <- list(c("IL23-/-_Velocity", "IL23-/-_CSR", "IL23-/-_SHM"),
+                                 c("IL23-/-_Velocity", "IL23-/-_CSR", "IL23-/-_SHM"))
+distances <- rbind(reshape2::melt(distances[[1]]), reshape2::melt(distances[[2]]))
+svg("Hong_IL23_figures/Hong_KLD.svg", width = 5.5, height = 3.5)
+ggplot(distances, aes(x = Var1, y = Var2, fill = value)) + geom_tile() +
+  geom_text(aes(label = round(value, 3), colour = (value > 1)), size = 3) + xlab("") + ylab("") +
+  scale_fill_gradient2(high = "forestgreen", name = "Kullback-\nLeibler\ndivergence") +
+  cowplot::theme_cowplot() + 
+  scale_colour_manual(values = c("black", "white"), guide = "none") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+dev.off()
+```
+
+## Get the frequency of jumping within and between cell types in the Markov chains
+
+```{r, fig.width=7.25, fig.height=4.5}
+markov_freq_matrices <- list(
+  lapply(wt_comparisons$sampled_transitions, reshape2::melt),
+  lapply(ko_comparisons$sampled_transitions, reshape2::melt)
+)
+markov_freq_matrices[[1]][[1]]$type <- "RNA velocity"
+markov_freq_matrices[[1]][[2]]$type <- "CSR"
+markov_freq_matrices[[1]][[3]]$type <- "SHM"
+markov_freq_matrices[[2]][[1]]$type <- "RNA velocity"
+markov_freq_matrices[[2]][[2]]$type <- "CSR"
+markov_freq_matrices[[2]][[3]]$type <- "SHM"
+markov_freq_matrices <- list(
+  do.call("rbind", markov_freq_matrices[[1]]),
+  do.call("rbind", markov_freq_matrices[[2]])
+)
+markov_freq_matrices[[1]]$Status <- "WT"
+markov_freq_matrices[[2]]$Status <- "IL23-/-"
+markov_freq_matrices <- do.call("rbind", markov_freq_matrices)
+markov_freq_matrices$type <- factor(
+  markov_freq_matrices$type, levels = c("RNA velocity", "CSR", "SHM")
+)
+svg("markovchain_traj_freqmat.svg", width = 9, height = 5)
+ggplot(markov_freq_matrices, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() + cowplot::theme_cowplot() + 
+  facet_grid(Status ~ type, scales = "free") +
+  scale_fill_gradient2(name = "frequency (%)", labels = scales::percent, limits = c(0, 0.15), oob = scales::squish) + xlab("") + ylab("") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+dev.off()
+```
+
+## Compare stationary distrbutions
+
+```{r, fig.width=4, fig.height=5}
+# compare stationary distributions
+load("all_tpt_models.rda")
+stat_dists <- do.call("rbind", list(
+  tpt_wt_velo$stationary_distribution,
+  tpt_wt_csr$stationary_distribution,
+  tpt_wt_shm$stationary_distribution,
+  tpt_ko_velo$stationary_distribution,
+  tpt_ko_csr$stationary_distribution,
+  tpt_ko_shm$stationary_distribution
+))
+colnames(stat_dists) <- levels(Idents(hong))
+stat_dists <- reshape2::melt(stat_dists)
+stat_dists$Var1 <- factor(stat_dists$Var1, labels = c("WT_RNA velocity", "WT_CSR",
+                                                      "WT_SHM",
+                                                      "IL23-/-_RNA velocity",
+                                                      "IL23-/-_CSR", "IL23-/-_SHM"))
+stat_dists$Status <- sapply(as.character(stat_dists$Var1), function(x){
+  unlist(strsplit(x, split = "_"))[1]
+})
+stat_dists$type <- sapply(as.character(stat_dists$Var1), function(x){
+  unlist(strsplit(x, split = "_"))[2]
+})
+stat_dists$type <- factor(
+  stat_dists$type, levels = c("RNA velocity", "CSR", "SHM")
+)
+
+obs_dists <- list(
+  data.frame(table(wt$clusters_named) / sum(table(wt$clusters_named))),
+  data.frame(table(ko$clusters_named) / sum(table(ko$clusters_named)))
+)
+obs_dists[[1]]$Status <- "WT"
+obs_dists[[2]]$Status <- "IL23-/-"
+obs_dists <- do.call("rbind", obs_dists)
+obs_dists$type <- "observed distribution"
+colnames(obs_dists) <- colnames(stat_dists)[-1]
+stat_dists <- rbind(stat_dists[, -1], obs_dists)
+
+svg("Hong_IL23_figures/hong_stationary.svg", width = 5, height = 4.5)
+ggplot(stat_dists, aes(x = Var2, y = type, fill = value)) +
+  geom_tile() + scale_fill_viridis_c(name="% cells", labels = scales::percent, breaks = c(0, 0.2, 0.4)) +
+  cowplot::theme_cowplot() + facet_wrap(~ Status, ncol = 1) +
+  xlab("") + ylab("") + 
+  #geom_text(aes(label = scales::percent(value, accuracy = 0.1),
+  #              color = value < 0.2), size = 3) +
+  #scale_color_manual(values = c("TRUE" = "white", "FALSE" = "black")) +
+  #guides(color = FALSE) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom")
+dev.off()
+```
+
+## Refit TPT betwen isotypes
+
+The above considers transitions between cell types - now we want to consider transitions between isotypes (i.e. CSR)
+
+```{r}
+#-----------------------------
+# analyse transition between isotypes 
+tpt_ko_isotype <- fitTPT(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/Hong_IL23_Bcells_IGHC_assay-RNA_scVelo_IL23--.h5ad",
+  conda_env = "scicsr", CellrankObj = g_ko_csr, group.cells.by = "isotype",
+  source_state = 'M', target_state = 'A'
+)
+tpt_wt_isotype <- fitTPT(
+  anndata_file = "/media/josephn/Seagate4TB/GLT_datasets/Hong_IL23_IgG2b/Hong_IL23_Bcells_IGHC_assay-RNA_scVelo_WT.h5ad",
+  conda_env = "scicsr", CellrankObj = g_wt_csr, group.cells.by = "isotype",
+  source_state = 'M', target_state = 'A'
+)
+
+```
+
+```{r, fig.width=8, fig.height=6}
+cowplot::plot_grid(
+  cowplot::plot_grid(
+    plotFluxMatrix(tpt_wt_isotype, hong) + ggtitle("WT"), 
+    plotStationaryDistribution(tpt_wt_isotype, hong), 
+    ncol = 1, align = "v", axis = "lr", rel_heights = c(3, 2)),
+  cowplot::plot_grid(
+    plotFluxMatrix(tpt_ko_isotype, hong) + ggtitle("IL23-/-"), 
+    plotStationaryDistribution(tpt_ko_isotype, hong), 
+    ncol = 1, align = "v", axis = "lr", rel_heights = c(3, 2)),
+  nrow = 1, align = "h", axis = "tb"
+)
+```
+
+```{r}
+save(tpt_wt_isotype, tpt_ko_isotype, file = "csr_isotype.rda")
+```
+
+```{r, fig.width = 4, fig.height = 3}
+load("csr_isotype.rda")
+#show flux difference
+test <- list(plotFluxMatrix(tpt_wt_isotype, hong, return_plot = FALSE),
+             plotFluxMatrix(tpt_ko_isotype, hong, return_plot = FALSE))
+test <- merge(test[[1]], test[[2]], by = c("from", "to"), 
+              all = TRUE, sort = FALSE, suffixes = c("_WT", "_KO"))
+test$flux_diff <- test$flux_KO - test$flux_WT
+
+test <- merge(test, 
+              data.frame(tpt_ko_isotype$stationary_distribution), 
+              by.x = "to", by.y = "row.names")
+
+ggplot(test[which(!is.na(test$flux_diff)), ], 
+       aes_string(x = "from", y = "to", color = "flux_diff", 
+                  size = "tpt_ko_isotype.stationary_distribution")) +
+    geom_point() + cowplot::theme_cowplot() + 
+    scale_color_gradient2(name = "flux_KO -\nflux_WT", limits = c(-5, 5), 
+                          high = "blue", low = "red", na.value = "blue") +
+  scale_size_continuous(name = "") +
+    scale_x_discrete(drop = FALSE, position = "top") + scale_y_discrete(drop = FALSE) #+
+
+
+```
+
+## Side-by-side comparison of stationary distrbution against observed isotype distribution
+
+```{r, fig.height=4, fig.width=4}
+stationary <- list(plotStationaryDistribution(tpt_wt_isotype, hong, 
+                                              return_plot = FALSE),
+                   plotStationaryDistribution(tpt_ko_isotype, hong, 
+                                              return_plot = FALSE))
+stationary[[1]]$setup <- "WT"
+stationary[[2]]$setup <- "IL23-/-"
+stationary <- rbind(stationary[[1]], stationary[[2]])
+stationary$setup <- factor(stationary$setup, levels=  c("WT", "IL23-/-"))
+
+# get observed distrbution of isotypes
+obs_isotypes <- data.frame(table(hong$IGH_c_gene, hong$Status))
+obs_isotypes <- obs_isotypes[which(obs_isotypes$Var1 != ""), ]
+obs_isotypes <- merge(
+  obs_isotypes, ddply(obs_isotypes, "Var2", summarise, total = sum(Freq)),
+  by = c("Var2")
+)
+obs_isotypes$prop <- obs_isotypes$Freq / obs_isotypes$total
+
+stationary$type <- "sciCSR"
+obs_isotypes$type <- "observed"
+obs_isotypes$Var1 <- factor(
+  obs_isotypes$Var1,
+  levels = c("IGHM", "IGHD", "IGHG3", "IGHG1", "IGHG2B", "IGHG2C", "IGHE", "IGHA"),
+  labels = c("M", "D", "G3", "G1", "G2b", "G2c", "E", "A")
+)
+obs_isotypes$lowq <- obs_isotypes$prop
+obs_isotypes$highq <- obs_isotypes$prop
+stationary <- list(
+  stationary[, c("isotype", "stationary", "lowq", "highq", "setup", "type")],
+  obs_isotypes[, c("Var1", "prop", "lowq", "highq", "Var2", "type")]
+)
+colnames(stationary[[2]]) <- colnames(stationary[[1]])
+stationary <- do.call("rbind", stationary)
+stationary$isotype <- factor(
+  stationary$isotype,
+  levels = c("M", "D", "G3", "G1", "G2b", "G2c", "E", "A")
+)
+stationary$type <- factor(stationary$type, levels = c("sciCSR", "observed"))
+svg("Hong_IL23_figures/hong_stationary_compare_obs.svg", width =4, height=4)
+ggplot(stationary, aes(x = stationary, y = isotype, fill = type, 
+                       xmin = lowq, xmax = highq)) +
+  geom_bar(position = position_dodge2(), stat = "identity") + 
+  geom_errorbar(width = 0, position = position_dodge2()) + cowplot::theme_cowplot() +
+  facet_grid(setup ~ type, scales = "free_x") + 
+  scale_x_continuous(name = "isotype distribution", breaks= c(0, 0.2, 0.4), limits = c(0, 0.5)) +
+  scale_y_discrete(drop=FALSE) + ylab("")
+  #scale_fill_manual(values = c("IL23-/-" = "grey", "WT" = "grey30"))
+dev.off()
+```
+
+Quantify the difference using cosine similarity:
+
+```{r}
+stationary2 <- reshape2::dcast(stationary, setup + isotype ~ type, value.var = "stationary")
+stationary2$sciCSR[is.na(stationary2$sciCSR)] <- 0
+stationary2$observed[is.na(stationary2$observed)] <- 0
+ddply(stationary2, c("setup"), summarise,
+      cosine = philentropy::cosine_dist(sciCSR, observed, testNA = FALSE),
+      jsd = philentropy::jensen_shannon(sciCSR, observed, testNA = FALSE, unit = "log2"),
+      spearman = cor(sciCSR, observed, method = "spearman"))
+```
+
+```{r}
+sessionInfo()
+```

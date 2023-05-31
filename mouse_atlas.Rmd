@@ -1,0 +1,184 @@
+---
+title: "mouse B cells atlas"
+output: html_notebook
+---
+
+```{r setup}
+library(Seurat)
+library(sciCSR)
+```
+
+Use here two datasets:
+
+* [Mathew et al.](https://www.sciencedirect.com/science/article/pii/S2211124721006574)
+* [Luo et al.](https://cellandbioscience.biomedcentral.com/articles/10.1186/s13578-022-00795-6)
+
+```{r}
+mathew <- '/media/josephn/Seagate4TB/GLT_datasets/MathewEtAl_mouse_Flu/MathewEtAl_mouse_Flu/outs/count/filtered_feature_bc_matrix'
+mathew <- Read10X(mathew)
+
+luo <- '/media/josephn/Seagate4TB/GLT_datasets/LuoEtAl_mouse_peritoneum/LuoEtAl_mouse_peritoneum/outs/count/filtered_feature_bc_matrix'
+luo <- Read10X(luo)
+
+mouse <- list(mathew, luo)
+
+# merge all Ig[hkl][vdj] into 'IGVDJ'
+for(i in 1:2){
+  vdj <- colSums(as.matrix(mouse[[i]][rownames(mouse[[i]])[grepl("^Ig[hkl][vdj][0-9]", rownames(mouse[[i]]))], ]))
+  # Remove individual genes from the matrix
+  mouse[[i]] <- mouse[[i]][-which(grepl("^Ig[hkl][vdj][0-9]", rownames(mouse[[i]]))), ]
+  mouse[[i]] <- rbind(mouse[[i]], vdj)
+  rownames(mouse[[i]])[nrow(mouse[[i]])] <- c("Ig-vdj")
+}
+
+mathew <- CreateSeuratObject( mouse[[1]], project = "Mathew",
+                              min.cells = 3, min.features = 200 )
+luo <- CreateSeuratObject( mouse[[2]], project = 'Luo', 
+                           min.cells = 3, min.features = 200 )
+
+```
+
+```{r}
+# normalise data, find variable features, PCA & UMAP
+normalise_dimreduce <- function(obj, var_explained_lim = 0.015, run_harmony = TRUE,
+                                harmony_group_vars = NULL)
+{
+  obj[["percent.mt"]] <- PercentageFeatureSet(obj, pattern ="^mt-")
+  obj <- subset(obj, subset = (percent.mt < 10))
+  obj <- NormalizeData(obj, verbose = FALSE)
+  obj <- FindVariableFeatures(obj, nfeatures = 2000, verbose = FALSE)
+  varfeat <- VariableFeatures(obj)
+  varfeat <- varfeat[!grepl("Igh[mdea]$|Ighg[1-3]|Ig[hkl][vdj]|Ig[kl]c|Tr[abgd]|Igll$|Jchain", varfeat)]
+  all.genes <- rownames(obj)
+  obj <- ScaleData(obj, features = all.genes, verbose = FALSE)
+  obj <- RunPCA(obj, features = varfeat, verbose = FALSE)
+  if( run_harmony ){
+    obj <- harmony::RunHarmony(obj, group.by.vars = harmony_group_vars, 
+                               assay.use = "RNA")
+  }
+  var_explained <- (obj@reductions$pca@stdev)^2 / sum((obj@reductions$pca@stdev)^2 )
+  dim <- max(which(var_explained > var_explained_lim))
+  cat(paste0("Top", dim,"PCs explain variance >=", 
+             var_explained_lim,".\n"))
+  if( run_harmony ){
+    obj <- RunUMAP(obj, reduction = "harmony", dims = 1:dim, verbose = FALSE,
+                   umap.method = "umap-learn", metric = "correlation")
+  } else {
+    obj <- RunUMAP(obj, reduction ="pca", dims = 1:dim, verbose = FALSE, 
+                   umap.method ="umap-learn", metric ="correlation")
+  }
+  obj <- FindNeighbors(obj, dims = 1:dim, verbose = FALSE)
+  obj <- FindClusters(obj, resolution = 0.6, verbose = FALSE)
+  obj
+}
+mathew <- normalise_dimreduce( mathew, run_harmony = FALSE )
+luo <- normalise_dimreduce( luo, run_harmony = FALSE )
+saveRDS(list("Mathew" = mathew, "Luo" = luo), 'mouse_atlas.rds')
+```
+
+```{r, fig.width=8, fig.height=3}
+cowplot::plot_grid(
+  DimPlot(mathew, label = TRUE),
+  DimPlot(luo, label = TRUE),
+  nrow = 1, axis = "tb", align = "h"
+)
+```
+
+```{r, fig.width=7, fig.height=7}
+FeaturePlot(mathew, features = c("Cd19", "Ms4a1", "Prdm1", "Cd3e", "Cd14", "Nkg7", "Cst3"))
+```
+
+```{r, fig.width=7, fig.height=7}
+FeaturePlot(luo, features = c("Cd19", "Ms4a1", "Prdm1", "Cd3e", "Cd14", "Nkg7", "Cst3"))
+```
+
+```{r, fig.width=4, fig.height=3}
+# b cells as those with positive Cd19 OR Cd20 (Ms4a1)
+mathew <- subset(mathew, subset = (Ms4a1 > 0 | Cd19 > 0))
+luo <- subset(luo, subset = (Ms4a1 > 0 | Cd19 > 0))
+mouse <- merge(mathew, luo, add.cell.ids = c("Mathew", "Luo"), merge.data = FALSE,
+               project = "mouse_B")
+mouse <- normalise_dimreduce(mouse, run_harmony = FALSE)
+DimPlot(mouse, label = TRUE)
+saveRDS(mouse, "mouse_Bcells_atlas.rds")
+```
+
+```{r}
+mouse <- readRDS("mouse_Bcells_atlas.rds")
+```
+
+```{r, fig.width=17, fig.height=5}
+all_markers <- FindAllMarkers(mouse, only.pos = TRUE, logfc.threshold = 0.6)
+all_markers <- lapply(split(all_markers, f = all_markers$cluster), function(tb){
+  tb <- tb[order(tb$avg_log2FC, decreasing = TRUE), ]
+  tb <- tb[1:min(10, nrow(tb)), ]
+  tb$gene
+}) 
+all_markers <- unique(unlist(all_markers))
+all_markers <- all_markers[!is.na(all_markers)]
+DotPlot(mouse, features = all_markers) + RotatedAxis()
+```
+
+```{r}
+c_genes <- c("Ighm", "Ighd", "Ighg3", "Ighg1", "Ighg2b", "Ighg2c", 
+             "Ighe", "Igha", "Aicda")
+FeaturePlot(mouse, features = c_genes)
+```
+
+```{r}
+mouse[["percent.IGV"]] <- PercentageFeatureSet(mouse, pattern = "^Ig-vdj")
+VlnPlot(mouse, features = c("percent.mt", "percent.IGV"), pt.size = 0)
+```
+
+```{r}
+bamfiles <- c(sapply(1:24, 
+                     function(x) paste0('MathewEtAl_mouse_Flu/Sample_', x,
+                                        '/sample_alignments.bam')),
+              'LuoEtAl_mouse_peritoneum/D_bcells.bam',
+              'LuoEtAl_mouse_peritoneum/E_bcells.bam',
+              'LuoEtAl_mouse_peritoneum/F_bcells.bam')
+
+data("mouse_definitions")
+
+mouse_IGH <- lapply(bamfiles[1:24], function(bamfile){
+  cat(paste0(bamfile, " ...\n"))
+  out <- getIGHmapping(bamfile, mouse_definitions)
+  out2 <- getIGHreadType(out$read_count)
+  out3 <- summariseIGHreads(out2, mouse_definitions)
+  # Changing the barcode formats according to sample
+  if( grepl("Mathew", bamfile ) ){
+    sample_name <- "Mathew"
+    library_name <- unlist(strsplit(bamfile, split = "/"))[2]
+    library_name <- unlist(strsplit(library_name, split = "_"))[2]
+  } else if (grepl("Luo", bamfile)){
+    sample_name <- "Luo"
+    if(grepl("D_", bamfile)) library_name <- "1"
+    if(grepl("E_", bamfile)) library_name <- "2"
+    if(grepl("F_", bamfile)) library_name <- "3"
+  }
+  rownames( out3 ) <- paste0(sample_name, "_", rownames( out3 ))
+  rownames( out3 ) <- gsub("-1", paste0("-", library_name), rownames( out3 ))
+  out3
+})
+mouse_IGH <- do.call("rbind", mouse_IGH)
+save("mouse_IGH", file="mouse_Bcells_atlas_IGHC-counts.RData")
+```
+
+```{r}
+load("mouse_Bcells_atlas_IGHC-counts.RData")
+mouse_IGH <- mouse_IGH[ which( rownames(mouse_IGH) %in% Cells(mouse) ), ] # only cells surviving in the dataset
+mouse <- mergeIgHCountsToSeurat( mouse_IGH, mouse, assay = "IGHC" )
+mouse <- NormalizeData( mouse, assay = "IGHC" )
+```
+
+```{r, fig.width=9, fig.height=5}
+genes <- c(rownames(mouse@assays$IGHC)[grepl("-P$", rownames(mouse@assays$IGHC))],
+           rownames(mouse@assays$IGHC)[grepl("-S$", rownames(mouse@assays$IGHC))])
+
+DotPlot(mouse, features = genes, assay = "IGHC") + RotatedAxis()
+```
+
+```{r}
+saveRDS(mouse, "mouse_Bcells_atlas_IGHC.rds")
+
+```
