@@ -3,7 +3,7 @@ title: "A simulated system to validate JC/IC calls"
 output: html_notebook
 ---
 
-Here I try to simulate sequencing reads, align them with tools used in the standard scRNAseq workflow, and validate the accuracy of JC/IC calls I implemented.
+Here I try to simulate sequencing reads, align them with tools used in the standard scRNAseq workflow, and validate the accuracy of productive/sterile calls I implemented.
 
 ```{r setup}
 library(polyester)
@@ -14,7 +14,7 @@ library(polyester)
 Set up a synthetic 'genome' made up of a rearranged IgH VDJ locus and the IGHC locus:
 
 * VDJ - here use the CR3022 DNA sequence for the VH region (GenBank DQ168569). 
-* Each C gene - takes the sequence from the TSS of the sterile transcript (which I mapped - see the python notebooks, READMEs etc) up to the end of the last exon of the gene according to Ensembl.
+* Each C gene - takes the sequence from the TSS of the sterile transcript, up to the end of the last exon of the gene according to Ensembl.
 
 Then sample reads from this genome. Set up independent runs (i.e. different cell where):
 
@@ -23,7 +23,7 @@ Then sample reads from this genome. Set up independent runs (i.e. different cell
 3. Repeat for each cell steps (1) and (2) $r$ times. $r$ is the sequencing depth of the cell.
 4. Repeat steps (1) to (3) $n$ times. $n$ is the size of the cell population.
 
-The resulting library is then put to alignment using both [STAR]() (which is used in the 10X cellranger suite) and [HISAT2]() (a popular RNAseq alignment software), and call JC/IC using our workflow. Check similarity with the prescribed sampling probabilities. Also check how this similarity changes with smaller $n$ and $r$ by subsampling.
+The resulting library is then put to alignment using both [STAR]() (which is used in the 10X cellranger suite) and [HISAT2]() (a popular RNAseq alignment software), and call productive/sterile transcripts using our workflow. Check similarity with the prescribed sampling probabilities.
 
 ```{r}
 # CR3022 cDNA sequence
@@ -333,7 +333,7 @@ We compare the following statistics:
 
 2. Distribution derived from the short-read library, i.e. empirical probability of expression determined directly from the sampled short-reads (using `polyester`). We can do so by examining the FASTQ headers; here we can compare the effects of positional bias (either 5' or 3' biased) on sampling the reads.
 
-3. Distribution derived from aligning the short-read sequences using BLAT and HISAT2. This is enumerated using our IC/JC detection workflow.
+3. Distribution derived from aligning the short-read sequences using BLAT and HISAT2, and calling productive/sterile transcripts.
 
 ```{r, eval=FALSE}
 # annotation of the fastq headers
@@ -399,9 +399,6 @@ saveRDS(ighc, "human_IGHC_lookup_table.rds")
 
 
 ## Subsampling
-
-* Subsample cells
-* Subsample reads per cell
 
 ```{r}
 bamfiles <- list.files(path = 'polyester_simulations', pattern = "tagged.bam$",
