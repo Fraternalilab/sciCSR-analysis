@@ -1,0 +1,245 @@
+---
+title: "distribution of scRNA-seq reads and switch region motifs over Igh genomic locus"
+output: html_notebook
+---
+
+```{r setup}
+library(Seurat)
+library(sciCSR)
+```
+
+```{r}
+# read in scRNA-seq read coverage in bedgraph format
+# (output`bedtools coverage` ... in the command line)
+bedgraph <- list.files(path = "scPure",
+                       pattern = "_105581450-105861800.bedGraph",
+                       full.names = TRUE)
+bedgraph <- lapply(bedgraph, function(x){
+  o <- read.table(x, sep = "\t")
+  o$pop <- unlist(strsplit(basename(x), split = "_"))[1]
+  o
+})
+bedgraph <- do.call("rbind", bedgraph)
+bedgraph <- bedgraph[which(bedgraph$V2 >= 105581450 &
+                             bedgraph$V3 <= 105861800), ]
+bedgraph$pop <- factor(bedgraph$pop,
+                       levels = rev(c("Transitional", "Naive",
+                                  "IgMMem", "ClassicalMem", "DN")))
+
+# Location of germline transcripts
+ighc <- read.table('scPure/hg38_IGHC_pos.txt',
+                   sep = "\t", stringsAsFactors = FALSE,
+                   header = TRUE)
+
+# count of 5'-AGCT-3' from the genome
+# obtained via IGV
+agct <- "scPure/hg38_IGH_AGCTcount.bedGraph"
+agct <- read.table(agct, sep = "\t")
+```
+
+```{r}
+# function to plot the bedgraph data
+library(ggplot2)
+
+plotBedGraph <- function(bedgraph, genes, agct,
+                         cap_reads = 3000,
+                         region_start = NULL,
+                         region_end = NULL,
+                         return.plot = TRUE)
+{
+  if( !is.null(region_start) & !is.null(region_end) ){
+    bedgraph <- bedgraph[which(bedgraph$V2 >= region_start &
+                                 bedgraph$V3 <= region_end), ]
+    if( !is.null( agct ) ){
+      agct <- agct[which(agct$V2 >= region_start &
+                           agct$V3 <= region_end), ]
+    }
+    genes <- genes[which(genes$Gene.start..bp. >= region_start &
+                           genes$I.exon.start <= region_end), ]
+  }
+  g1 <- ggplot(bedgraph, aes(xmin = V2, xmax = V3, ymin = 0, ymax = V4)) +
+    geom_rect(fill = "black") + cowplot::theme_cowplot() +
+    facet_wrap(~ pop, ncol = 1,strip.position = "right",
+               scales = "free_y") + 
+    scale_y_continuous(breaks = c(0, cap_reads)) +
+    coord_cartesian(ylim = c(0, cap_reads)) 
+  g2 <- ggplot(genes, aes(xmin = Gene.start..bp., xmax = Gene.end..bp.,
+                   ymin = -0.5, ymax = 0.5)) +
+    geom_rect(fill = "black") + 
+    geom_segment(aes(x = I.exon.start, xend = Gene.end..bp.,
+                     y = 0, yend = 0)) + 
+    geom_segment(aes(x = I.exon.start, xend = I.exon.start,
+                     y = 0, yend = 1)) + 
+    geom_segment(aes(x = I.exon.start, xend = Gene.end..bp.,
+                     y = 1, yend = 1),
+                 arrow = arrow(length = unit(3, "pt"))) + 
+    geom_text(aes(x = Gene.start..bp.,
+                  y = -0.5, label = gsub("IGH", "", Gene.name)), 
+              nudge_y = -0.8, size = 3.5) + ylim(-2, 1.5) +
+    cowplot::theme_cowplot() + 
+    theme(axis.title = element_blank(), axis.line = element_blank(),
+          axis.text = element_blank(), axis.ticks = element_blank())
+  if( !is.null( agct ) ){
+    g3 <- ggplot(agct, aes(x = (V2+V3)/2, y = V4)) +
+    geom_bar(stat = "identity") + cowplot::theme_cowplot() + xlab("") +
+    scale_y_log10(name = "Number of AGCT\nnucleotide strings", limits = c(1, 30))  
+  }
+  g1 <- g1 + scale_x_reverse(labels = function(x) x / 1000)
+  g2 <- g2 + scale_x_reverse(labels = function(x) x / 1000)
+  if( !is.null( agct ) ){
+    g3 <- g3 + scale_x_reverse(labels = function(x) x / 1000)
+  }
+  if( !is.null(region_start) & !is.null(region_end) ){
+    g1 <- g1 + scale_x_reverse(limits = c(region_end, region_start),
+                               labels = function(x) x / 1000)
+    g2 <- g2 + scale_x_reverse(limits = c(region_end, region_start),
+                               labels = function(x) x / 1000)
+    if( !is.null( agct ) ){
+      g3 <- g3 + scale_x_reverse(limits = c(region_end, region_start),
+                               labels = function(x) x / 1000)
+    }  
+  }
+  if( return.plot ){
+    if( !is.null( agct ) ){
+      cowplot::plot_grid(g1, g3, g2, align = "v", axis = "lr", ncol = 1,
+                         rel_heights = c(5, 2, 1))
+    } else {
+      cowplot::plot_grid(g1, g2, align = "v", axis = "lr", ncol = 1,
+                         rel_heights = c(5, 1))
+    }
+  } else {
+    if( !is.null( agct ) ){
+      list(g1, g2, g3)
+    } else return( list(g1, g2) )
+  }
+}
+```
+
+```{r}
+# actual plotting
+pdf(file = "Documents/MACSMAF/sciCSR/Fig1b_genomeBrowser.pdf",
+    width = 8.5, height = 4)
+cowplot::plot_grid(
+  plotBedGraph(bedgraph, genes = ighc, agct,
+               region_start = 105847000, region_end = 105862000), # IgM
+  plotBedGraph(bedgraph, genes = ighc, agct,
+               region_start = 105730000, region_end = 105750000), # IgG1 
+  plotBedGraph(bedgraph, genes = ighc, agct,
+               region_start = 105635000, region_end = 105650000), # IgG2
+  nrow = 1, align = "h", axis = "tb"
+)
+dev.off()
+
+png(file = "Documents/MACSMAF/sciCSR/Fig1supp_genomeBrowser_wholeIgH.png",
+    width = 7000, height = 4500, res = 300)
+g_all <- plotBedGraph(bedgraph, genes = ighc, 
+                      agct[which(agct$V2 >= 105581000 &
+                                   agct$V3 <= 105862000), ], 
+                      return.plot = FALSE)
+cowplot::plot_grid(
+  g_all[[1]] + geom_rect(data = ighc,
+                         aes(xmin = Gene.end..bp.,
+                             xmax = I.exon.start,
+                             ymin = 0, ymax = 3000),
+                             fill = "pink", alpha = 0.3) + 
+    geom_rect(fill = "black", alpha = 0),
+  ggplot(agct[which(agct$V2 >= 105581000 &
+                      agct$V3 <= 105862000), ]) + 
+    geom_bar(aes(x = (V2+V3)/2, y = V4), stat = "identity") + 
+    cowplot::theme_cowplot() + xlab("") +
+    scale_y_log10(name = "Number of AGCT\nnucleotide strings", 
+                  limits = c(1, 30)) + 
+    geom_rect(data = ighc,
+              aes(xmin = Gene.end..bp., xmax = I.exon.start,
+                  ymin = 0, ymax = 30),
+              fill = "pink", alpha = 0.3) + 
+    scale_x_reverse(labels = function(x) x / 1000),
+  g_all[[2]] + scale_x_reverse(limits = c(105862000, 105581000 ),
+                               labels = function(x) x / 1000), 
+  axis = "lr", align = "v", ncol = 1,
+  rel_heights = c(5, 2, 1)
+)
+dev.off()
+```
+
+As control, examine single-exon gene to look at where reads tend to concentrate in the 5' data:
+
+```{r}
+# JUNB
+bedgraph <- list.files(path = "scPure",
+                       pattern = "chr19.*.bedGraph",
+                       full.names = TRUE)
+bedgraph <- lapply(bedgraph, function(x){
+  o <- read.table(x, sep = "\t")
+  o$pop <- unlist(strsplit(basename(x), split = "_"))[1]
+  o
+})
+bedgraph <- do.call("rbind", bedgraph)
+bedgraph$pop <- factor(bedgraph$pop,
+                       levels = rev(c("Transitional", "Naive",
+                                  "IgMMem", "ClassicalMem", "DN")))
+gene_table <- read.table('scPure/hg38_JUNB_RHOB.txt',
+                         sep = "\t", stringsAsFactors = FALSE,
+                         header = TRUE)
+junb <- plotBedGraph(bedgraph, genes = gene_table[2, , drop = FALSE], NULL,
+                     return.plot = FALSE, region_end = 12794000,
+                     region_start = 12790500, cap_reads = 7000)
+junb_plot <- cowplot::plot_grid(
+  junb[[1]] + scale_x_continuous(limits = c(12790500, 12794000), 
+                                 labels = function(x) x / 1000) +
+    geom_rect(data = gene_table[2, , drop = FALSE],
+              aes(xmin = I.exon.start,
+                  xmax = I.exon.start + 600,
+                  ymin = 0, ymax = 7000),
+              fill = "skyblue", alpha = 0.3) +
+    ggtitle("JUNB"),
+  junb[[2]] + scale_x_continuous(limits = c(12790500, 12794000), 
+                                 labels = function(x) x / 1000) +
+    geom_segment(aes(x = gene_table[2, "Gene.end..bp."], 
+                     xend = gene_table[2, "End"],
+                     y = 0, yend = 0)),
+  axis = "lr", align = "v", ncol = 1,
+  rel_heights = c(5, 1)
+)
+
+# RHOB
+bedgraph <- list.files(path = "scPure",
+                       pattern = "chr2.*.bedGraph",
+                       full.names = TRUE)
+bedgraph <- lapply(bedgraph, function(x){
+  o <- read.table(x, sep = "\t")
+  o$pop <- unlist(strsplit(basename(x), split = "_"))[1]
+  o
+})
+bedgraph <- do.call("rbind", bedgraph)
+bedgraph$pop <- factor(bedgraph$pop,
+                       levels = rev(c("Transitional", "Naive",
+                                  "IgMMem", "ClassicalMem", "DN")))
+rhob <- plotBedGraph(bedgraph, genes = gene_table[1, , drop = FALSE], NULL,
+                     return.plot = FALSE, region_end = 20450000,
+                     region_start = 20446500, cap_reads = 1000)
+rhob_plot <- cowplot::plot_grid(
+  rhob[[1]] + scale_x_continuous(limits = c(20446500, 20450000), 
+                                 labels = function(x) x / 1000) +
+    ggtitle("RHOB") +
+    geom_rect(data = gene_table[1, , drop = FALSE],
+              aes(xmin = I.exon.start,
+                  xmax = I.exon.start + 600,
+                  ymin = 0, ymax = 7000),
+              fill = "skyblue", alpha = 0.3),
+  rhob[[2]] + scale_x_continuous(limits = c(20446500, 20450000), 
+                                 labels = function(x) x / 1000) +
+    geom_segment(aes(x = gene_table[1, "Gene.end..bp."], 
+                     xend = gene_table[1, "End"],
+                     y = 0, yend = 0)),
+  axis = "lr", align = "v", ncol = 1,
+  rel_heights = c(5, 1)
+)
+
+svg("Documents/MACSMAF/sciCSR/Fig1supp_genomeBrowser_JUNB_RHOB.svg",
+    width = 9, height = 4.5)
+cowplot::plot_grid(
+  junb_plot, rhob_plot, nrow = 1, align = "tb"
+)
+dev.off()
+```

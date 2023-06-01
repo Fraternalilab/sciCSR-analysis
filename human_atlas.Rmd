@@ -7,6 +7,294 @@ library(Seurat)
 library(sciCSR)
 ```
 
+# Productive/sterile transcript quantification
+
+```
+```
+
+## Visualisation
+
+```{r}
+library(Seurat)
+pure <- '/Volumes//Seagate4TB/GLT_datasets/scPure/scPure2_Pure1Integrated_noPC_IGHC_metacells.rds'
+pure <- readRDS(pure)
+pure <- subset(pure, subset = (orig.ident == "HB6"))
+
+king <- '/Volumes//Seagate4TB/GLT_datasets/King_Tonsil/SEURAT_OBJECTS/HumanTonsil_BCells_scRNA_IGHC_metacell_SeuratObject.rds'
+king <- readRDS(king)
+king <- subset(king, idents = c("Naive", "MBC", "Activated", "preGC", "LZ GC", "DZ GC", "prePB",
+                                "Plasmablast"))
+Idents(king) <- factor(Idents(king), levels = c("Naive", "MBC", "Activated", "preGC", "LZ GC", "DZ GC", "prePB",
+                                                "Plasmablast"))
+king$CellType <- factor(king$CellType, levels = c("Naive", "MBC", "Activated", "preGC", "LZ GC", "DZ GC", "prePB",
+                                                  "Plasmablast"))
+
+#-------------------------
+# Stewart et al Dotplot of Sterile/productive transcript expression
+library(ggplot2)
+genes <- rownames(pure@assays$IGHC)
+genes <- genes[grepl("-[IJ]C$", genes)]
+ighc_plot <- DotPlot(pure, assay = "IGHC", group.by = "library_id",
+        features = genes) + coord_flip() + RotatedAxis()
+ighc_plot <- ighc_plot$data
+ighc_plot$features.plot <- gsub("-IC", "-S", ighc_plot$features.plot)
+ighc_plot$features.plot <- gsub("-JC", "-P", ighc_plot$features.plot)
+genes <- gsub("-IC", "-S", genes)
+genes <- gsub("-JC", "-P", genes)
+ighc_plot$features.plot <- factor(ighc_plot$features.plot, 
+                                  levels = genes)
+ighc_plot$id <- factor(ighc_plot$id, levels = rev(c("Transitional",
+                                                "Naive",
+                                                "IgM_Memory", 
+                                                "Classical_Memory",
+                                                "DN")))
+svg("Documents/MACSMAF/sciCSR/Fig_scPure_IgH_dotplot.svg", 
+    width = 6.5, height = 2.5)
+ggplot(ighc_plot[!grepl("IGHD", ighc_plot$features.plot), ], 
+       aes(y = id, x = features.plot, size = pct.exp,
+           color = avg.exp.scaled)) +
+  geom_point() + cowplot::theme_cowplot() +
+  scale_color_gradient(low = "white", high = "purple", name = "Average\nExpression") +
+  scale_size_continuous(name = "Percent\nExpressed") + 
+  scale_x_discrete(position = "top") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0)) +
+  ylab("") + xlab("") 
+dev.off()
+
+#-------------------------
+# % cells with zero counts distribution
+# plot productive/sterile counts on top
+pure_nnz <- tabulate(slot(pure[["RNA"]], "counts")@i + 1) / length(Cells(pure))
+pure_nnz <- data.frame(nnz = pure_nnz)
+pure_ighc_nnz <- data.frame(gene = rownames(slot(pure[["IGHC"]], "counts")),
+                            nnz = tabulate(slot(pure[["IGHC"]], "counts")@i + 1) / 
+                              length(Cells(pure)))
+pure_ighc_nnz$type <- sapply(pure_ighc_nnz$gene, function(x) unlist(strsplit(x, split = "-"))[2])
+pure_ighc_nnz$type <- factor(pure_ighc_nnz$type, levels = c("IC", "JC", "C"),
+                             labels = c("sterile", "productive", "uninformative"))
+pure_ighc_nnz$gene <- gsub("IGH", "", gsub("-.*", "", pure_ighc_nnz$gene))
+pure_ighc_nnz <- pure_ighc_nnz[which(pure_ighc_nnz$gene != "D"), ]
+
+king_nnz <- tabulate(slot(king[["RNA"]], "counts")@i + 1) / length(Cells(king))
+king_nnz <- data.frame(nnz = king_nnz)
+king_ighc_nnz <- data.frame(gene = rownames(slot(king[["IGHC"]], "counts")),
+                            nnz = tabulate(slot(king[["IGHC"]], "counts")@i + 1) / 
+                              length(Cells(king)))
+king_ighc_nnz$type <- sapply(king_ighc_nnz$gene, function(x) unlist(strsplit(x, split = "-"))[2])
+king_ighc_nnz$type <- factor(king_ighc_nnz$type, levels = c("IC", "JC", "C"),
+                             labels = c("sterile", "productive", "uninformative"))
+king_ighc_nnz$gene <- gsub("IGH", "", gsub("-.*", "", king_ighc_nnz$gene))
+king_ighc_nnz <- king_ighc_nnz[which(king_ighc_nnz$gene != "D"), ]
+
+library(ggplot2)
+g_pure_nnz <- ggplot(pure_nnz, aes(nnz)) + geom_histogram() + 
+  scale_x_log10(labels = scales::percent, name = "% cells with positive counts") +
+  geom_point(aes(y = 1200, x = nnz), data = pure_ighc_nnz[which(pure_ighc_nnz$type == "productive"), ], 
+             pch = 4, color = "#d45500") +
+  geom_text(aes(y = 1200, x = nnz, label = gene), data = pure_ighc_nnz[which(pure_ighc_nnz$type == "productive"), ],
+            vjust = -1.5, color = "#d45500") + 
+  geom_text(aes(y = 1200, x = 0.65, label = "productive"), vjust = -1.5, color = "#d45500") + 
+  geom_point(aes(y = 1400, x = nnz), data = pure_ighc_nnz[which(pure_ighc_nnz$type == "sterile"), ], 
+             pch = 4, color = "#e5b799") +
+  geom_text(aes(y = 1400, x = nnz, label = gene), data = pure_ighc_nnz[which(pure_ighc_nnz$type == "sterile"), ],
+            vjust = -1.5, color = "#e5b799") + 
+  geom_text(aes(y = 1400, x = 0.65, label = "sterile"), vjust = -1.5, color = "#e5b799") + 
+  scale_y_continuous(breaks = c(0, 500, 1000), limits = c(0, 1500), name = "Number of genes") +
+  cowplot::theme_cowplot()
+g_king_nnz <- ggplot(king_nnz, aes(nnz)) + geom_histogram() + 
+  scale_x_log10(labels = scales::percent, name = "% cells with positive counts") +
+  geom_point(aes(y = 1600, x = nnz), data = king_ighc_nnz[which(king_ighc_nnz$type == "productive"), ], 
+             pch = 4, color = "#d45500") +
+  geom_text(aes(y = 1600, x = nnz, label = gene), data = king_ighc_nnz[which(king_ighc_nnz$type == "productive"), ],
+            vjust = -1.5, color = "#d45500") + 
+  geom_text(aes(y = 1600, x = 0.65, label = "productive"), vjust = -1.5, color = "#d45500") + 
+  geom_point(aes(y = 1800, x = nnz), data = king_ighc_nnz[which(king_ighc_nnz$type == "sterile"), ], 
+             pch = 4, color = "#e5b799") +
+  geom_text(aes(y = 1800, x = nnz, label = gene), data = king_ighc_nnz[which(king_ighc_nnz$type == "sterile"), ],
+            vjust = -1.5, color = "#e5b799") + 
+  geom_text(aes(y = 1800, x = 0.65, label = "sterile"), vjust = -1.5, color = "#e5b799") + 
+  scale_y_continuous(breaks = c(0, 500, 1000, 1500), limits = c(0, 2000), name = "Number of genes") +
+  cowplot::theme_cowplot()
+
+pdf("Documents/MACSMAF/sciCSR/sparsity.pdf", width = 5.5, height = 8 )
+cowplot::plot_grid(
+  g_pure_nnz + ggtitle("Stewart et al\n(peripheral blood)"), 
+  g_king_nnz + ggtitle("King et al\n(tonsil)"), ncol = 1, align = "v", axis = "lr"
+)
+dev.off()
+
+#---------------------------
+# count of cells with sterile transcripts 0/==1/>1 isotype
+sterile_counts <- list(
+  slot(pure[["IGHC"]], "counts"),
+  slot(king[["IGHC"]], "counts")
+)
+sterile_counts <- lapply(sterile_counts, function(x){
+  Matrix::t(x[which(grepl("-IC", rownames(x)) & !grepl("IGHD", rownames(x))), ])
+})
+sterile_stats <- lapply(sterile_counts, function(x){
+  y <- x@i + 1
+  y <- factor(y, levels = 1:nrow(x))
+  c(table(y))
+})
+
+pure_sterile <- pure@meta.data[, c("library_id"), drop = FALSE]
+king_sterile <- king@meta.data[, c("CellType"), drop = FALSE]
+sterile_stats <- do.call("rbind", list(
+  data.frame(cell_type = pure_sterile$library_id, sterile_n = sterile_stats[[1]],
+             dataset = "Stewart et al."),
+  data.frame(cell_type = king_sterile$CellType, sterile_n = sterile_stats[[2]],
+             dataset = "King et al.")
+))
+library(plyr)
+sterile_stats <- merge(
+  ddply(sterile_stats, c("dataset", "cell_type"),
+        summarise,
+        n_zero = sum(sterile_n == 0),
+        n_one = sum(sterile_n == 1),
+        n_plus = sum(sterile_n >1)),
+  ddply(sterile_stats, c("dataset", "cell_type"), nrow),
+  by = c("dataset", "cell_type")
+)
+sterile_stats$prop_zero <- sterile_stats$n_zero / sterile_stats$V1
+sterile_stats$prop_one <- sterile_stats$n_one / sterile_stats$V1
+sterile_stats$prop_plus <- sterile_stats$n_plus / sterile_stats$V1
+sterile_stats <- reshape2::melt(sterile_stats, id.vars = c("dataset", "cell_type"), 
+                                measure.vars = c("prop_zero", "prop_one", "prop_plus"))
+sterile_stats[which(sterile_stats$dataset == "Stewart et al." &
+                      sterile_stats$cell_type == "Naive"), "cell_type"] <- " Naive"
+sterile_stats$cell_type <- factor(sterile_stats$cell_type,
+                                  levels = c("Naive", "MBC", "Activated", "preGC", "LZ GC", "DZ GC", "prePB",
+                                             "Plasmablast", "Transitional", " Naive",
+                                             "IgM_Memory", "Classical_Memory", "DN"))
+pdf("Documents/MACSMAF/sciCSR/sparsity_sterile.pdf", width = 6.2, height = 4 )
+ggplot(sterile_stats, aes(x = cell_type, y = value, fill = variable)) +
+  geom_bar(position = "fill", stat = "identity") + cowplot::theme_cowplot() +
+  facet_grid(cols = vars(dataset), scales = "free_x", space = "free_x") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(labels = scales::percent, name = "% cells") + xlab("") +
+  scale_fill_manual(values = c("prop_zero" = "grey80", "prop_one" = "grey50",
+                               "prop_plus" = "grey20"),
+                    labels = c("no sterile\ntranscripts", "1 isotype", ">1 isotype"), 
+                    name = "Sterile transcripts\nobserved in cell")
+dev.off()
+
+#---------------------------
+# total UMI count per cell vs total sterile transcript counts vs scaled
+steriles <- paste0("IGH", c("M", "G3", "G1", "A1", "G2", "G4", 'E', "A2"), "-IC")
+pure <- AddMetaData(pure, Matrix::colSums(slot(pure[["IGHC"]], "counts")[steriles, ]),
+                    "total_ic")
+pure <- ScaleData(pure, vars.to.regress = "nCount_RNA", assay = "IGHC")
+pure <- AddMetaData(pure, Matrix::colSums(slot(pure[["IGHC"]], "scale.data")[steriles, ]),
+                    "scaled_total_ic")
+pdf("Documents/MACSMAF/sciCSR/total_sterile_regression.pdf", width = 7.7, height = 4.1 )
+cowplot::plot_grid(
+  ggplot(pure@meta.data, aes(x = nCount_RNA, y = total_ic)) + 
+    geom_point() + geom_smooth(method = "loess") + cowplot::theme_cowplot() +
+    xlab("Total UMI count per cell") + 
+    ylab("Total expression of sterile transcripts per cell") +
+    ggtitle("No regression"),
+  ggplot(pure@meta.data, aes(x = nCount_RNA, y = scaled_total_ic)) + 
+    geom_point() + geom_smooth(method = "loess") + cowplot::theme_cowplot() +
+    xlab("Total UMI count per cell") + 
+    ylab("") + ggtitle("Regressed out Total UMI count"),
+  nrow = 1, align = "h", axis = "tb"
+)
+dev.off()
+
+#---------------------------
+source("/Volumes/Seagate4TB/GLT_datasets/cellrank_tpt.R")
+# (1) stacked bars of JC per cell type
+pure <- FindNeighbors(pure)
+pure <- getCSRpotential(pure, ighc_slot = "counts", mode = "furthest")
+king <- getCSRpotential(king, c_gene_anno_name = "ISOTYPE", ighc_slot = "counts")
+
+pure_jc <- pure@meta.data[, c("library_id", "isotype")]
+pure_jc$library_id <- factor(pure_jc$library_id,
+                             levels = c("Transitional", "Naive",
+                                        "IgM_Memory", "Classical_Memory", "DN"))
+g_pure_jc <- ggplot(pure_jc, aes(x = library_id, fill = isotype)) +
+  geom_bar(position = "fill") + cowplot::theme_cowplot() + xlab("") +
+  scale_y_continuous(labels = scales::percent, name = "% cells") +
+  scale_fill_manual(values = c("M" = "#a5cee2", "D" = "#1e76ba", "A1" = "#b7db90",
+                               "A2" = "#309f2b", "G1" = "#f99b97", "G2" = "#de191d",
+                               "G3" = "#fdbe6d", "G4" = "#fe7f01", "E" = "#c9b1d6")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+king_jc <- king@meta.data[, c("CellType", "ISOTYPE")]
+king_jc$isotype <- gsub("Ig", "", king_jc$ISOTYPE)
+king_jc <- king_jc[which(!is.na(king_jc$isotype)), ]
+king_jc <- king_jc[which(!is.na(king_jc$CellType)), ]
+king_jc <- king_jc[which(! king_jc$isotype %in% c("Multi", "None")), ]
+g_king_jc <- ggplot(king_jc, aes(x = CellType, fill = isotype)) +
+  geom_bar(position = "fill") + cowplot::theme_cowplot() + xlab("") +
+  scale_y_continuous(labels = scales::percent, name = "% cells") +
+  scale_fill_manual(values = c("M" = "#a5cee2", "D" = "#1e76ba", "A1" = "#b7db90",
+                               "A2" = "#309f2b", "G1" = "#f99b97", "G2" = "#de191d",
+                               "G3" = "#fdbe6d", "G4" = "#fe7f01", "E" = "#c9b1d6")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+pdf("Documents/MACSMAF/sciCSR/jc.pdf", width = 3.5, height = 7)
+cowplot::plot_grid(
+  g_pure_jc + ggtitle("Stewart et al\n(peripheral blood)"),
+  g_king_jc + ggtitle("King et al\n(tonsil)"), ncol = 1, align = "v", axis = "lr"
+)
+dev.off()
+
+# (2) boxplot / median + errorbar of total_ic per cell type
+pure_ic <- pure@meta.data[, c("library_id", "total_ic")]
+pure_ic$library_id <- factor(pure_ic$library_id,
+                             levels = c("Transitional", "Naive",
+                                        "IgM_Memory", "Classical_Memory", "DN"))
+pure_ic <- ddply(pure_ic, "library_id", summarise, 
+                 ngz = sum(total_ic > 0) / length(total_ic))
+g_pure_ic <- ggplot(pure_ic, aes(x = library_id, y = 1, fill = ngz)) +
+  geom_tile() + cowplot::theme_cowplot() + xlab("") + ylab("") +
+  scale_fill_viridis_c("% cells expressing\nsterile transcripts", limits = c(0, 1)) +
+  geom_text(aes(label = scales::percent(ngz, accuracy = 0.1))) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.text.y = element_blank(),
+        axis.line = element_blank(), axis.ticks = element_blank())
+
+king_ic <- king@meta.data[, c("CellType", "total_ic")]
+king_ic <- king_ic[which(!is.na(king_ic$CellType)), ]
+king_ic <- ddply(king_ic, "CellType", summarise, 
+                 ngz = sum(total_ic > 0) / length(total_ic))
+g_king_ic <- ggplot(king_ic, aes(x = CellType, y = 1, fill = ngz)) +
+  geom_tile() + cowplot::theme_cowplot() + xlab("") + ylab("") +
+  scale_fill_viridis_c("% cells expressing\nsterile transcripts", limits = c(0, 1)) +
+  geom_text(aes(label = scales::percent(ngz, accuracy = 0.1))) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.text.y = element_blank(),
+        axis.line = element_blank(), axis.ticks = element_blank())
+
+pdf("Documents/MACSMAF/sciCSR/ic.pdf", width = 6.8, height = 5)
+cowplot::plot_grid(
+  cowplot::plot_grid(
+    g_pure_ic + ggtitle("Stewart et al\n(peripheral blood)"),
+    nrow = 1, rel_widths = c(4, 1)
+  ),
+  g_king_ic + ggtitle("King et al\n(tonsil)"), 
+  ncol = 1, align = "v", axis = "lr", rel_heights = c(1.1, 1)
+)
+dev.off()
+
+pdf("Documents/MACSMAF/sciCSR/jcic_pure.pdf", width = 5.2, height = 6.2)
+cowplot::plot_grid(g_pure_ic, g_pure_jc, 
+                   ncol = 1, align = "v", axis = "lr", 
+                   rel_heights = c(1, 2))
+dev.off()
+pdf("Documents/MACSMAF/sciCSR/jcic_king.pdf", width = 7.2, height = 6.2)
+cowplot::plot_grid(g_king_ic, g_king_jc, 
+                   ncol = 1, align = "v", axis = "lr", 
+                   rel_heights = c(1, 2))
+dev.off()
+
+```
+
+
+# Combining the Stewart et al and King et al data
+
 ```{r}
 # read Stewart et al & King et al atlas
 pure <- 'scPure2_Pure1Integrated_noPC_IGHC_metacells.rds'
@@ -47,6 +335,8 @@ DimPlot(combined, label = TRUE)
 ```{r}
 saveRDS(combined, '/media/josefng/Seagate4TB/GLT_datasets/scPure-HB6_KingTonsil_integrated.rds')
 ```
+
+# Deriving CSR potential
 
 One easy way to derive a score would be to decompose the productive/sterile count matrix for "isotype signatures" - one would expect a prominent signature being a naive like signature (i.e. IgM-dominated) - and then extract the weight (coefficient) associated with this signature for each cell. And then invert this such that naive cells have a small number. The signature matrix can be stored and decompose future samples (i.e. new datasets) using nonnegative least square (NNLS) regression.
 
