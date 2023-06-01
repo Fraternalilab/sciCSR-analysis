@@ -1,0 +1,689 @@
+---
+title: "A simulated system to validate JC/IC calls"
+output: html_notebook
+---
+
+Here I try to simulate sequencing reads, align them with tools used in the standard scRNAseq workflow, and validate the accuracy of JC/IC calls I implemented.
+
+```{r setup}
+library(polyester)
+```
+
+# The system
+
+Set up a synthetic 'genome' made up of a rearranged IgH VDJ locus and the IGHC locus:
+
+* VDJ - here use the CR3022 DNA sequence for the VH region (GenBank DQ168569). 
+* Each C gene - takes the sequence from the TSS of the sterile transcript (which I mapped - see the python notebooks, READMEs etc) up to the end of the last exon of the gene according to Ensembl.
+
+Then sample reads from this genome. Set up independent runs (i.e. different cell where):
+
+1. Cell chooses to transcribe either a productive (i.e. VDJ spliced [concatenated] with beginning of C exon) or a sterile transcript (i.e. a transcript starting from the TSS upstream of the I-exon of the chosen C gene) with prescribed probabilities. 
+2. Sample reads from this region using R package [polyester]().
+3. Repeat for each cell steps (1) and (2) $r$ times. $r$ is the sequencing depth of the cell.
+4. Repeat steps (1) to (3) $n$ times. $n$ is the size of the cell population.
+
+The resulting library is then put to alignment using both [STAR]() (which is used in the 10X cellranger suite) and [HISAT2]() (a popular RNAseq alignment software), and call JC/IC using our workflow. Check similarity with the prescribed sampling probabilities. Also check how this similarity changes with smaller $n$ and $r$ by subsampling.
+
+```{r}
+# CR3022 cDNA sequence
+DQ168569 <- ape::read.GenBank("DQ168569", as.character = TRUE)
+# this is on minus strand so do complement
+CR3022 <- as.character(#Biostrings::reverseComplement(
+  Biostrings::DNAString(paste(as.character(DQ168569[[1]]), 
+                              collapse = ""))
+)#)
+# this is missing the final 2 codons - add them back
+CR3022 <- paste0( CR3022, "TCCTCA")
+
+# TSS locations for sterile transcripts
+tss = list("IGHG1" = c(105747325, 105747794),
+          "IGHG2" = c(105647807, 105648275), 
+          "IGHG3" = c(105775026, 105775495),
+          "IGHG4" = c(105629001, 105629470), 
+          "IGHE" = c(105605037, 105605176), 
+          "IGHA1" = c(105712352, 105712867), 
+          "IGHA2" = c(105591381, 105591896),
+          "IGHM" = c(105863197, 105863197)) # immediately downstream of IGHJ6
+
+tss <- t(data.frame(tss))
+colnames(tss) <- c("TSS_end", "TSS_start")
+ighc <- read.table("hg38_IGHC_pos.txt", header=TRUE, sep="\t",
+                   stringsAsFactors = FALSE)
+ighc <- merge(ighc, tss, by.x = "Gene.name", 
+              by.y = "row.names", sort = FALSE)
+colnames(ighc) <- c("Gene", "ENSG", "Chromosome", "End", "Start",
+                    "TSS_end", "TSS_start")
+```
+
+```{r}
+# for each gene, get:
+# (1) genomic sequence from TSS_start to End (i.e. sterile) using UCSC genome browser API, and
+# (2) coding sequence (for concatenation with VDJ) using ensembl biomart
+# (Note: ensembl biomart is indexed with genes, so one can't get complete genomic sequence of a given region unless it is fully enclosed within one gene)
+mart <- biomaRt::useMart("ensembl",
+                         dataset="hsapiens_gene_ensembl")
+seqs <- apply(ighc, MARGIN = 1, function(x){
+  gene <- as.character(x[1])
+  ensg <- as.character(x[2])
+  gene_end <- as.integer(x[4])
+  tss_start <- as.integer(x[7])
+  # IC (i.e. sterile)
+  ic <- httr::GET(paste0("http://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr14;start=", gene_end, ";end=", tss_start))
+  ic <- httr::content(ic)$dna
+  ic <- as.character(Biostrings::reverseComplement(Biostrings::DNAString(ic)))
+  # coding sequence (spliced) for C exon
+  seq <- biomaRt::getSequence(id = ensg, 
+                              type = "ensembl_gene_id", 
+                              seqType = "cdna", mart = mart)
+  # longest isoform (i.e. the membrane-bounded isoform)
+  longest <- which.max(sapply(seq$cdna, nchar))
+  o <- list(ic, paste0(CR3022, seq$cdna[longest]))
+  names(o) <- c(paste0(gene, "-", "sterile"),
+                paste0(gene, "-", "spliced"))
+  return(o)
+})
+seqs <- unlist(seqs)
+Biostrings::writeXStringSet( Biostrings::DNAStringSet( seqs ),
+                             filepath = "CR3022_ref_IGHC.fasta")
+ighc$spliced_length <- sapply(seqs[grepl("spliced", names(seqs))],
+                              nchar)
+ighc$spliced_length <- ighc$spliced_length - nchar(CR3022)
+ighc
+```
+
+```{r}
+# do a version where the "spliced" actually still contains
+# the intron before C (i.e. it is productive but unspliced)
+seqs_unspliced <- apply(ighc, MARGIN = 1, function(x){
+  gene <- as.character(x[1])
+  ensg <- as.character(x[2])
+  gene_end <- as.integer(x[4])
+  tss_start <- as.integer(x[7])
+  # IC (i.e. sterile)
+  ic <- httr::GET(paste0("http://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr14;start=", gene_end, ";end=", tss_start))
+  ic <- httr::content(ic)$dna
+  ic <- as.character(Biostrings::reverseComplement(Biostrings::DNAString(ic)))
+  o <- list(ic, paste0(CR3022, ic))
+  names(o) <- c(paste0(gene, "-", "sterile"),
+                paste0(gene, "-", "spliced"))
+  return(o)
+})
+seqs_unspliced <- unlist(seqs_unspliced)
+Biostrings::writeXStringSet( Biostrings::DNAStringSet( seqs_unspliced ),
+                             filepath = "CR3022_ref_IGHC_productive-unspliced.fasta")
+```
+
+# Positional bias
+
+One of the parameters in the `polyester` simulation is positional bias, i.e. likelihood to sample a read changes with the location within the transcript. Since some scRNA-seq protocols use either 5' or 3' enrichment (e.g. from 10X genomics), this should be included in the simulation. 
+
+We can establish the positional bias from real 10X datasets by examining the empirical distribution of read coverage (of a control non-immunoglobulin gene), and use these baseline bias in running `polyester`.
+
+* 5' - the scPure dataset we published in Front Immunol
+* 3' - 10k PBMC 3' v3.1 chemistry, Chromium X ([link](https://www.10xgenomics.com/resources/datasets/10k-human-pbmcs-3-v3-1-chromium-controller-3-1-high))
+
+```{r}
+# the simulation
+simulateIgHreads <- function( ref_seqs, fasta_dir, productive_C,
+                              productive_prob, sterile_probs,
+                              n_cells, n_reads_per_cell, seed,
+                              positional_bias = NULL,
+                              fastq = TRUE )
+{
+  if( !is.data.frame(positional_bias) )
+    stop("'positional_bias' should either be NULL (no bias) or a data frame.")
+  if( is.null(positional_bias) ) positional_bias <- "none"
+  set.seed(seed)
+  if( !is.null(sterile_probs )){
+    if( !is.null(productive_prob)){
+      if( length( productive_prob) > 1 ){
+        sterile_probs <- sterile_probs * (1 - sum(productive_prob))
+      } else {
+        sterile_probs <- sterile_probs * (1 - productive_prob)
+      }
+    }
+    names(sterile_probs) <- paste0(names(sterile_probs),
+                                   "-sterile")
+  }
+  if( !is.null(productive_prob)){
+    probs <- productive_prob
+    names(probs) <- paste0(productive_C, "-spliced")
+    probs <- c(probs, sterile_probs)
+  } else probs <- sterile_probs
+  if( is.null(probs) ) stop("given probability vector is NULL. No simulation is done.")
+  count_mat <- rmultinom(n = n_cells, n_reads_per_cell, 
+                         prob = probs)
+  rownames(count_mat) <- names(probs)
+  colnames(count_mat) <- paste0("sample_", 1:ncol(count_mat))
+  # subset the reference fasta sequences
+  tmp_fasta <- tempfile()
+  ref_seqs <- Biostrings::readDNAStringSet(ref_seqs)
+  ref_seqs <- ref_seqs[names(probs)]
+  Biostrings::writeXStringSet(ref_seqs, tmp_fasta)
+  if( !dir.exists(fasta_dir) ){
+    sysoutdir = gsub(" ", "\\\\ ", fasta_dir)
+    if (.Platform$OS.type == "windows") {
+        shell(paste("mkdir", sysoutdir))
+    }
+    else {
+        system(paste("mkdir -p", sysoutdir))
+    }    
+  }
+  writeParamsToFile(params = list('probs' = probs,
+                                  'n_cells' = n_cells,
+                                  'n_reads_per_cell' = n_reads_per_cell), outfile = file.path(fasta_dir, "params.txt"))
+  polyester::simulate_experiment_countmat(
+    fasta = tmp_fasta, readmat = count_mat, 
+    bias = positional_bias,
+    outdir = fasta_dir, paired = FALSE, seed = seed)
+  if( fastq ){
+    # add dummy quality strings and write out a fastq file
+    fasta <- Biostrings::readDNAStringSet( file.path(fasta_dir, "sample.fasta") )
+    seq_length <- length(fasta[1])
+    cigar_string <- rep(paste(rep("F", seq_length), 
+                              collapse = ""), length(fasta))
+    cigar_string <- Biostrings::BStringSet( cigar_string )
+    cigar_string <- Biostrings::PhredQuality( cigar_string )
+    fastq <- Biostrings::QualityScaledDNAStringSet(fasta,
+                                                   cigar_string)
+    Biostrings::writeQualityScaledXStringSet(
+      fastq, 
+      filepath = file.path(fasta_dir, "sample.fastq.gz"),
+      compress = TRUE
+    )
+  }
+  return( count_mat )
+}
+
+writeParamsToFile <- function(params, outfile = "params.txt")
+{
+  if( sum(grepl("spliced", names(params$probs)) > 0) ){
+    productive <- names(params$probs)[grepl("spliced",
+                                            names(params$probs))]
+    write("Productive:", outfile)
+    write(paste0(productive, " probability: ",
+                 params$probs[productive]),
+          outfile, append = TRUE)
+  }
+  if( sum(grepl("sterile", names(params$probs)) > 0) ){
+    sterile <- names(params$probs)[grepl("sterile",
+                                         names(params$probs))]     
+    write("\nSterile:", outfile, append=TRUE)
+    write(paste0(sterile, " probability: ",
+                 params$probs[sterile]), 
+          outfile, append = TRUE)
+  }
+  write(paste0("\nNumber of cells = ", params$n_cells),
+        outfile, append = TRUE)
+  write(paste0("\nNumber of reads per cell = ",
+               params$n_reads_per_cell), outfile, append = TRUE)
+  return(NULL)
+}
+
+# wrapper for the whole simulation. save the simulated counts
+# as a RDS file
+simulateIgH <- function(productive_p, sterile_p,
+                        positional_bias, dir_name,
+                        ref_seqs_name = "CR3022_ref_IGHC.fasta"){
+  n <- 1000 # number of cells
+  r <- 1000 # number of reads
+  o <- simulateIgHreads(ref_seqs = ref_seqs_name, 
+                        fasta_dir = dir_name, 
+                        productive_C = names(productive_p),
+                        productive_prob = productive_p, 
+                        positional_bias = positional_bias,
+                        sterile_probs = sterile_p, n_cells = n,
+                        n_reads_per_cell = r, seed = 123)
+  saveRDS(o, file.path(dir_name, 'simulated_counts.rds'))
+  return(NULL)
+}
+
+```
+
+```{r message=FALSE, warning=FALSE}
+simulation_cases <- list(
+  # case1: 100% sterile IgG1
+  list(
+    "productive" = NULL,
+    "sterile" = c("IGHG1" = 1)
+  ),
+  # case2: 100% sterile IgA1
+  list(
+    "productive" = NULL,
+    "sterile" = c("IGHA1" = 1)
+  ),
+  # case3: 100% sterile IgE
+  list(
+    "productive" = NULL,
+    "sterile" = c("IGHE" = 1)
+  ),
+  # case4: mixture of sterile IgG subtypes
+  list(
+    "sterile" = c("IGHG1" = 0.4, "IGHG2" = 0.3, "IGHG3" = 0.2,
+                  "IGHG4" = 0.1)
+  ),
+  # case5: mixture of sterile IgA subtypes
+  list(
+    "sterile" = c("IGHA1" = 0.6, "IGHA2" = 0.4)
+  ),
+  # case6: 100% productive IgG1
+  list(
+    "productive" = c("IGHG1" = 1),
+    "sterile" = NULL
+  ),
+  # case7: 100% productive IgA1
+  list(
+    "productive" = c("IGHA1" = 1),
+    "sterile" = NULL
+  ),
+  # case8: mixture of productive IgG subtypes
+  list(
+    "productive" = c("IGHG1" = 0.4, "IGHG2" = 0.3, "IGHG3" = 0.2,
+                     "IGHG4" = 0.1),
+    "sterile" = NULL
+  ),
+  # case9: mixture of productive IgA subtypes
+  list(
+    "productive" = c("IGHA1" = 0.6, "IGHA2" = 0.4),
+    "sterile" = NULL
+  )
+)
+
+# 5' model
+load('/Users/josefng/polyester/data/cdnaf.rda')
+fiveprime <- cdnaf
+fiveprime$prob <- rev(fiveprime$prob)
+lapply(1:length(simulation_cases), function(x){
+  l <- simulation_cases[[x]]
+  simulateIgH(l$productive, l$sterile,
+              positional_bias = fiveprime,
+              dir_name = paste0("polyester_simulations/case", x))
+  system(paste0("mv polyester_simulations/case", x, 
+                "/sample.fastq.gz polyester_simulations/case", x, "/fiveprime_case", x, ".fastq.gz" ))
+  system(paste0("mv polyester_simulations/case", x, 
+                "/simulated_counts.rds polyester_simulations/case", x, "/fiveprime_case", x, "_simulated_counts.rds" ))
+  system(paste0("rm polyester_simulations/case", x,
+                "/sample.fasta"))
+})
+
+# 3' model
+#threeprime <- readRDS('threeprime_positional_bias_10XPBMC.rds')
+threeprime <- cdnaf
+lapply(1:length(simulation_cases), function(x){
+  l <- simulation_cases[[x]]
+  simulateIgH(l$productive, l$sterile,
+              positional_bias = threeprime,
+              dir_name = paste0("polyester_simulations/case", x))
+  system(paste0("mv polyester_simulations/case", x, 
+                "/sample.fastq.gz polyester_simulations/case", x, "/threeprime_case", x, ".fastq.gz" ))
+  system(paste0("mv polyester_simulations/case", x, 
+                "/simulated_counts.rds polyester_simulations/case", x, "/threeprime_case", x, "_simulated_counts.rds" ))
+  system(paste0("rm polyester_simulations/case", x,
+                "/sample.fasta"))
+})
+
+```
+
+# Evaluation
+
+We compare the following statistics:
+
+1. The 'ground-truth' distribution of expression, i.e. the pre-determined probability of expressing each sterile/productive Ig transcript (*already written out as *`params.txt`)
+
+2. Distribution derived from the short-read library, i.e. empirical probability of expression determined directly from the sampled short-reads (using `polyester`). We can do so by examining the FASTQ headers; here we can compare the effects of positional bias (either 5' or 3' biased) on sampling the reads.
+
+3. Distribution derived from aligning the short-read sequences using BLAT and HISAT2. This is enumerated using our IC/JC detection workflow.
+
+```{r, eval=FALSE}
+# annotation of the fastq headers
+fastq_headers <- list.files(".*.fastq.header", path = "polyester_simulations/", recursive = TRUE, full.names = TRUE)
+fastq_headers <- lapply(fastq_headers, function(h){
+  o <- readLines(h)
+  data.frame(file = basename(h), fastq = o, 
+             stringsAsFactors = FALSE)
+})
+fastq_headers <- do.call("rbind", fastq_headers)
+
+fastq_headers$direction <- sapply(fastq_headers$file, function(x){
+  unlist(strsplit(x, split = "_"))[1]
+})
+fastq_headers$case <- sapply(fastq_headers$file, function(x){
+  gsub("fiveprime_|threeprime_", "", unlist(strsplit(x, split = ".", fixed = TRUE))[1])
+})
+fastq_headers$cell <- sapply(fastq_headers$fastq, function(x){
+  unlist(strsplit(x, split = "/"))[2]
+})
+fastq_headers$gene <- sapply(fastq_headers$fastq, function(x){
+  o <- unlist(strsplit(x, split = "/"))[3]
+  unlist(strsplit(o, split = ";"))[1]
+})
+fastq_headers[, c("start", "end")] <- t(sapply(fastq_headers$fastq, function(x){
+  o <- unlist(strsplit(x, split = "/"))[3]
+  o <- unlist(strsplit(o, split = ";"))
+  if(grepl("R$", o[3])){
+    o <- gsub("R", "", gsub("mate2:", "", o[3]))
+  } else {
+    o <- gsub("mate1:", "", o[2])
+  } 
+  o <- unlist(strsplit(o, split = "-"))
+  o
+}))
+fastq_headers$start <- as.numeric(fastq_headers$start)
+fastq_headers$end <- as.numeric(fastq_headers$end)
+fastq_headers <- fastq_headers[, c(-1, -2)]
+fastq_headers$IGHC <- sapply(fastq_headers$gene, function(x){
+  unlist(strsplit(x, split = "-"))[1]
+})
+# get length of 5' region for sterile
+ighc$sterile_length <- ighc$TSS_start - ighc$Start + 1
+# length of the spliced (ie productive VDJ)
+vdj_length <- nchar(CR3022)
+
+# for each read in fastq classify whether read is in
+# VDJ (for spliced), 5' region (for sterile) or C
+fastq_headers$region <- apply(fastq_headers[, c("gene", "IGHC", "start", "end")], MARGIN = 1, function(x){
+  if(grepl("spliced", as.character(x[1]))){
+    if(as.numeric(x[3]) < vdj_length & as.numeric(x[4]) < vdj_length) return("VDJ")
+  }
+  if(grepl("sterile", as.character(x[1]))){
+    if(as.numeric(x[3]) < ighc[which(ighc$Gene == as.character(x[2])), "sterile_length"]){ # only needs start from 5' region, the end doesn't matter
+      return("5' C")
+    }
+  }
+  return("C")
+})
+saveRDS(fastq_headers, "polyester_simulations/fastq_header_summary.rds")
+saveRDS(ighc, "human_IGHC_lookup_table.rds")
+```
+
+
+## Subsampling
+
+* Subsample cells
+* Subsample reads per cell
+
+```{r}
+bamfiles <- list.files(path = 'polyester_simulations', pattern = "tagged.bam$",
+                       recursive = TRUE, full.names = TRUE)
+
+library(doSNOW)
+numCores <- 4
+cl <- makeCluster(numCores)
+registerDoSNOW(cl)
+pb <- utils::txtProgressBar(max = length(bamfiles), 
+                            style = 3, file = stderr())
+progress <- function(n) utils::setTxtProgressBar(pb, n)
+opts <- list(progress = progress)
+IGHC_counts <- foreach(bamfile = bamfiles, 
+                       .options.snow = opts) %dopar% {
+  library(sciCSR)
+  data("human_definitions")
+  out <- getIGHmapping(bamfile, human_definitions)
+  out2 <- getIGHreadType(out$read_count)
+  out3 <- lapply(c(10, 25, 50, 100, 250, 500, 1000), function(x){
+    out2 <- split(out2, f = out2$CB)
+    out2 <- do.call("rbind", lapply(out2, function(tb){
+      set.seed(1234)
+      n_sample <- ifelse(x > nrow(tb), nrow(tb), x)
+      tb[sample(1:nrow(tb), n_sample, replace = FALSE), ]
+    }))
+    write.table(out2, paste0("polyester_simulations/", gsub(".bam", "", basename(bamfile)), "_nreads", x, "_sampled-seq.txt"), sep = "\t", col.names = TRUE, row.names = FALSE)
+    summariseIGHreads(out2, human_definitions)
+  })
+  names(out3) <- paste0("n_reads=", 
+                        c(10, 25, 50, 100, 250, 500, 1000))
+  out3
+}
+close(pb)
+stopCluster(cl) 
+names(IGHC_counts) <- basename( bamfiles )
+saveRDS(IGHC_counts, "polyester_simulations/IGHC_counts.rds")
+
+```
+
+```{r, fig.width=12, fig.height=9}
+# check productive mixture cases for misalignment
+IGHC_aln<- lapply(bamfiles[grepl("case[89]", bamfiles)], function(bamfile){
+  library(sciCSR)
+  data("human_definitions")
+  out <- getIGHmapping(bamfile, human_definitions)
+  out2 <- getIGHreadType(out$read_count)
+  return(list(out, out2))
+})
+names(IGHC_aln) <- basename(bamfiles)
+IGHC_aln <- lapply(names(IGHC_aln), function(x){
+  o <- IGHC_aln[[x]][[2]]
+  o$file <- x
+  o$aligner <- unlist(strsplit(x, split = "_"))[1]
+  o$direction <- unlist(strsplit(x, split = "_"))[2]
+  o$case <- unlist(strsplit(x, split = "_"))[3]
+  o[, -4]
+})
+IGHC_aln <- do.call("rbind", IGHC_aln)
+IGHC_aln2 <- merge(
+  IGHC_aln, fastq_headers[, c("case", "direction", "cell", "read", "gene")],
+  by.x = c("case", "direction", "CB", "UB"),
+  by.y = c("case", "direction", "cell", "read"),
+  all = FALSE, sort = FALSE
+)
+IGHC_aln2 <- ddply(
+  IGHC_aln2, c("case", "direction", "aligner", "gene", "anno"),
+  nrow
+)
+IGHC_aln2$isotype <- sapply(IGHC_aln2$gene, function(x){
+  if(x == "unassigned") return(x)
+  o <- substr(x, 1, 5)
+  if(grepl("_", o)) return( substr(o, 1, 4 )) else return(o)
+})
+IGHC_aln2$isotype_anno <- sapply(IGHC_aln2$anno, function(x){
+  if(x == "unassigned") return(x)
+  o <- substr(x, 1, 5)
+  if(grepl("_", o)) return( substr(o, 1, 4 )) else return(o)
+})
+IGHC_aln2 <- ddply(
+  IGHC_aln2, c("case", "direction", "aligner", "isotype", "isotype_anno"),
+  summarise,
+  n = sum(V1)
+)
+IGHC_aln2 <- merge(
+  IGHC_aln2,
+  ddply(IGHC_aln2, c("case", "direction", "aligner", "isotype"), 
+        summarise, V1 = sum(n)),
+  by = c("case", "direction", "aligner", "isotype"), all = TRUE
+)
+IGHC_aln2$prop <- IGHC_aln2$n / IGHC_aln2$V1
+
+svg("sciCSR/simulated_reads_misalign.svg", width=12, height=6.5)
+ggplot(IGHC_aln2, aes(x = isotype, y = isotype_anno, fill = prop)) + 
+   geom_tile() + geom_text(aes(label = round(prop * 100, 2), color = (prop < 0.5))) +scale_fill_gradient2() + scale_color_manual(values = c("TRUE" = "black", "FALSE" = "white"), name = "") +
+   facet_grid(case ~ direction + aligner, scales = "free", space = "free") + guides(colour = FALSE) +
+   cowplot::theme_cowplot() +
+  theme(axis.text.x = element_text(angle =45, hjust = 1))
+dev.off()
+```
+
+# Analysis
+
+```{r}
+#_______________________________________
+# ground-truth probability of expression
+getParams <- function( param_file )
+{
+  params <- readLines( param_file )
+  params <- params[ grepl( "probability", params ) ]
+  params <- sapply(params, function(x){
+    x <- unlist(strsplit(x, split = ": "))
+    o <- as.numeric( x[2] )
+    names( o ) <- gsub(" probability", "", x[1])
+    return( o )
+  }, USE.NAMES = FALSE)
+  params <- data.frame( params )
+  params$gene <- rownames( params )
+  params$type <- sapply(params$gene, function(x) unlist(strsplit(x, split = "-"))[2])
+  params$gene <- sapply(params$gene, function(x) unlist(strsplit(x, split = "-"))[1])
+  params$gene <- factor(params$gene, levels = c("IGHM", "IGHD", "IGHG3", "IGHG1",
+                                                "IGHA1", "IGHG2", "IGHG4", "IGHE",
+                                                "IGHA2"),
+                        labels = c("M", "D", "G3", "G1", "A1", 
+                                   "G2", "G4", "E", "A2"))
+  return(params)  
+}
+
+param_files <- list.files(pattern = 'params.txt', recursive = TRUE,
+                          path = 'polyester_simulations', full.names = TRUE)
+params <- lapply(param_files, function(x){
+  o <- getParams( x )
+  o$case <- unlist(strsplit(dirname( x ), split = "/"))[2]
+  o
+})
+params <- do.call("rbind", params)
+params$case <- factor(params$case, levels = paste0("case", 1:9))
+library(ggplot2)
+gt <- ggplot( data = params, aes(y = gene, x = params) ) + 
+  facet_wrap(~ type, ncol = 1, strip.position = "left") +
+  geom_bar(stat = "identity") + scale_x_continuous(name = "ground-truth probability of expression") +
+  scale_y_discrete(drop = FALSE) + cowplot::theme_cowplot()
+
+gt + facet_grid(type ~ case) + theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7))
+```
+
+```{r, fig.width=4, fig.height=8}
+# sampling distribution of polyester
+fastq_headers <- readRDS('polyester_simulations/fastq_header_summary.rds')
+library(plyr)
+sampled_seq <- ddply(fastq_headers, c("case", "direction", "gene", "IGHC", "region"), nrow)
+sampled_seq <- merge(sampled_seq, ddply(sampled_seq, c("case", "direction"), summarise, total = sum(V1)), by = c("case", "direction"))
+sampled_seq$prop <- sampled_seq$V1 / sampled_seq$total
+sampled_seq$direction <- factor(sampled_seq$direction,
+                                levels = c("fiveprime", "threeprime"),
+                                labels = c("5'", "3'"))
+sampled_seq$IGHC <- factor(sampled_seq$IGHC,
+                           levels = c("IGHM", "IGHD", "IGHG3", "IGHG1",
+                                      "IGHA1", "IGHG2", "IGHG4", "IGHE",
+                                      "IGHA2"),
+                           labels = c("M", "D", "G3", "G1", "A1", 
+                                      "G2", "G4", "E", "A2"))
+sampled_seq$type <- sapply(sampled_seq$gene, function(x){
+  unlist(strsplit(x, split = "-"))[2]
+})
+sampled_seq$case <- factor(sampled_seq$case, levels = paste0("case", 1:9))
+
+sampled_dist <- ggplot(sampled_seq[sampled_seq$case %in% paste0("case", 6:8), ], 
+                       aes(x = direction, y = prop, fill = region)) +
+  geom_bar(stat = "identity", position = position_dodge2()) +
+  cowplot::theme_cowplot() + 
+  scale_x_discrete(name = "", drop = FALSE) + 
+  facet_grid(rows = "case", scales = "free_x") + 
+  scale_y_continuous(name = "% reads sampled", labels = scales::percent) + scale_fill_manual(values = c("red", "grey", "yellow"))
+sampled_dist
+```
+
+Clearly as expected the 3'-biased libraries are less informative on distinguishing VDJ / 5' C reads as most reads there cover the C protein-coding region.
+
+```{r}
+IGHC_counts <- readRDS("polyester_simulations/IGHC_counts.rds")
+
+# aligned distribution
+aligned_dist <- list.files(pattern = ".*case.*_.*nreads1000.*sampled-seq.*",
+                           path = "polyester_simulations", full.names = TRUE)
+aligned <- lapply(aligned_dist, read.table, sep = "\t", 
+                  header = TRUE, stringsAsFactors = FALSE)
+names( aligned ) <- basename(aligned_dist)
+aligned <- lapply( names(aligned), function(x){
+  tb <- aligned[[x]]
+  tb$aligner <- unlist(strsplit(x, split = "_"))[1]
+  tb$bias <- ifelse(unlist(strsplit(x, split = "_"))[2] == "threeprime", "3'", "5'")
+  if(grepl("unspliced", x)){
+    tb$case <- paste(unlist(strsplit(x, split = "_"))[3:4],
+                     collapse = "_")
+  } else {
+    tb$case <- unlist(strsplit(x, split = "_"))[3]
+  }
+  tb
+} )
+aligned <- do.call("rbind", aligned)
+
+library(plyr)
+aligned <- ddply(aligned, c("case", "aligner", "bias", "anno"), nrow)
+aligned <- merge(aligned, ddply(aligned, c("case", "aligner", "bias"), summarise, total = sum(V1)))
+aligned$prop <- aligned$V1 / aligned$total
+aligned$type <- sapply(aligned$anno, function(x) unlist(strsplit(x, split = "_"))[2])
+aligned$type <- factor(aligned$type, levels = c("P", "S", "C"),
+                       labels = c("VDJ", "5' C", "C"))
+aligned$gene <- sapply(aligned$anno, function(x) unlist(strsplit(x, split = "_"))[1])
+aligned$gene <- factor(aligned$gene,
+                       levels = c("IGHM", "IGHD", "IGHG3", "IGHG1",
+                                  "IGHA1", "IGHG2", "IGHG4", "IGHE", "IGHA2"),
+                       labels = c("M", "D", "G3", "G1", "A1", 
+                                  "G2", "G4", "E", "A2"))
+aligned$case <- factor(aligned$case, levels = paste0("case", 1:9))
+
+aligned_dist <- aligned[which(aligned$case %in% paste0("case", 1:3) & !grepl("P$", aligned$anno)), ]
+aligned_dist$gene_cat <- apply(
+  aligned_dist[, c("case", "gene", "type")], MARGIN = 1, function(x){
+  if(x[1] == "case6"){
+    if(x[2] == "G1") {
+      return(x[3]) 
+    } else return("other genes")
+  }
+  if(x[1] == "case7"){
+    if(x[2] == "A1") {
+      return(x[3]) 
+    } else return("other genes")
+  }
+  if(x[1] == "case8"){
+    if(x[2] == "E") {
+      return(x[3]) 
+    } else return("other genes")
+  }
+})
+aligned_dist$case <- factor(aligned_dist$case,
+                            labels = c("100% sterile IgG1",
+                                       "100% sterile IgA1",
+                                       "100% sterile IgE"))
+aligned_dist <- aligned_dist[which(aligned_dist$type %in% c("5' C", "C")), ]
+aligned_dist <- ddply(aligned_dist, 
+                      c("case", "aligner", "bias", "gene", "type"),
+                      summarise, prop = sum(prop))
+aligned_dist <- ddply(aligned_dist, c("case", "aligner", "bias"),
+                      summarise, gene = gene, type = type, prop = prop, 
+                      sum_prop = cumsum(prop))
+#aligned_dist$gene <- factor(aligned_dist$gene,
+#                            levels = c("other genes", "VDJ", "C", "5' C"))
+aligned_dist <-ggplot(aligned_dist,
+       aes(y = interaction(aligner, gene))) +
+  geom_bar(aes(x = prop, 
+           fill = interaction(aligner, type)), stat = "identity") + 
+  geom_text(data = ddply(aligned_dist, 1:4, summarise, sum_prop = sum(prop)), aes(label = scales::percent(sum_prop, accuracy = 0.001), color = aligner, x = 0), hjust = 0, size= 2.5) +
+  scale_fill_manual(name = "", values = c("#00BFC4", "#d63887", "#bee0ec", "#f3c3db")) + 
+  scale_color_manual(name = "", values = c("#00BFC4", "#d63887")) + 
+  scale_x_continuous(name = "% of aligned reads", labels = scales::percent) + scale_y_discrete(drop = FALSE, name = "") +
+  cowplot::theme_cowplot() + facet_grid(bias ~ case) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8))
+aligned_dist
+
+pdf("sciCSR/Fig1_pureSterileReads_alignedCounts_reviewer.pdf", width = 7, height = 5.5)
+print(aligned_dist)
+dev.off()
+```
+
+```{r}
+aligned_mix <- aligned[aligned$case %in% paste0('case', 4:5) &
+                         aligned$type %in% c("VDJ", "C") &
+                         aligned$bias == "5'", ]
+aligned_mix <- merge(aligned_mix, params, by = c('case', 'gene'),
+                     suffixes = c("_aligned", "_gt"))
+aligned_mix$gene <- as.character(aligned_mix$gene)
+svg("sciCSR/simulated_reads_misalign_barplot_sterile_mix.svg", width = 6, height = 4)
+ggplot(aligned_mix, aes(x = interaction(aligner, gene), 
+                        y = prop, 
+                        fill = interaction(aligner, type_aligned))) +
+  geom_bar(stat = "identity") + 
+  geom_point(aes(y = params), pch = 4) + 
+  scale_fill_manual(name = "", values = c("#bee0ec", "#f3c3db", "#00BFC4", "#d63887")) + 
+  facet_grid(~ case, scales = "free_x", space = "free_x") +
+  cowplot::theme_cowplot() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+dev.off()
+```
