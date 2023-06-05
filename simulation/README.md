@@ -1,5 +1,7 @@
 # simulate sequencing reads from the Ig heavy chain locus for evaluating sterile/productive transcript distinction
 
+This analysis was performed using STAR aligner version 2.5.1.b, HISAT2 v2.2.1, by running these programs in a docker container. The file `Dockerfile` contains all the instructions to build the docker container.
+
 Steps:
 
 Before running alignments, use `hisat2_index.bash` and `star_index.bash` to index the chr14 genomic sequence for preparation of the alignment step. We downloaded the GRCh38 reference chr14 sequence and GTF files from [Ensembl](https://www.ensembl.org/Homo_sapiens/Info/Index) (release 105) but you may choose to use the entire genome - just that it would be slower.

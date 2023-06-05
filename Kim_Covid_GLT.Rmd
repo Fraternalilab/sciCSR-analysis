@@ -133,7 +133,7 @@ FeaturePlot(kim, c("MS4A1", "TCL1A", "AICDA", "CD38"))
 ```
 
 ```{r, eval=FALSE}
-saveRDS(kim, "WU368_kim_et_al_nature_2022_gex_b_cells.rds")
+saveRDS(kim, "Kim_Covid_Bcells.rds")
 ```
 
 ```{r, eval=FALSE}
@@ -168,22 +168,22 @@ kim_IGH <- lapply(bamfiles, function(bamfile){
   out3
 })
 kim_IGH <- do.call("rbind", kim_IGH)
-saveRDS(kim_IGH, "Kim_Covid_IGHC.rds")
+saveRDS(kim_IGH, "Kim_Covid_Bcells_IGHC.rds")
 ```
 
 ```{r, eval=FALSE}
-kim_IGH <- readRDS("Kim_Covid_IGHC.rds")
+kim_IGH <- readRDS("Kim_Covid_Bcells_IGHC.rds")
 kim_IGH <- kim_IGH[ which( rownames(kim_IGH) %in% kim$cell_id ), ] # only cells surviving in the dataset
 kim <- mergeIgHCountsToSeurat(kim_IGH, kim, assay_name = "IGHC")
 kim <- NormalizeData( kim, assay = "IGHC" )
-saveRDS(kim, "WU368_kim_et_al_nature_2022_gex_b_cells_IGHC.rds")
+saveRDS(kim, "Kim_Covid_Bcells_IGHC.rds")
 
 ```
 
 ### Visualise productive/sterile transcription level as dot plots
 
 ```{r, fig.width=12, fig.height=8}
-kim <- readRDS("WU368_kim_et_al_nature_2022_gex_b_cells_IGHC.rds")
+kim <- readRDS("Kim_Covid_Bcells_IGHC.rds")
 
 mapping <- c("covax07_d28" = "s7", "covax07_d60_1" = "s29", "covax07_d60_2" = "s30",
              "covax07_d110_1" = "s31", "covax07_d110_2" = "s32", 
@@ -269,18 +269,18 @@ kim <- getSHM(kim, v_identity_anno_name = "v_identity")
 kim@assays$RNA@scale.data <- matrix()
 convertSeuratToH5ad(subset(kim, subset = (anno_leiden_0.18 == "GC" & donor == "368-07" & timepoint %in% c("d60", "d110"))),
                     assays = c("RNA"),
-                    "WU368_kim_et_al_nature_2022_gex_b_cells_368-07_GC_IGHC.h5ad")
+                    "Kim_Covid_Bcells_368-07_GC_IGHC.h5ad")
 convertSeuratToH5ad(subset(kim, subset = (anno_leiden_0.18 == "GC" & donor == "368-20" & timepoint %in% c("d60", "d110"))),
                     assays = c("RNA"),
-                    "WU368_kim_et_al_nature_2022_gex_b_cells_368-20_GC_IGHC.h5ad")
+                    "Kim_Covid_Bcells_368-20_GC_IGHC.h5ad")
 
 # split data by timepoint
 splitAnnData(
-  anndata_file = "WU368_kim_et_al_nature_2022_gex_b_cells_368-07_GC_IGHC_assay-RNA.h5ad",
+  anndata_file = "Kim_Covid_Bcells_368-07_GC_IGHC_assay-RNA.h5ad",
   split.by = "timepoint", levels = c("d60", "d110"), conda_env = "scverse"
 )
 splitAnnData(
-  anndata_file = "WU368_kim_et_al_nature_2022_gex_b_cells_368-20_GC_IGHC_assay-RNA.h5ad",
+  anndata_file = "Kim_Covid_Bcells_368-20_GC_IGHC_assay-RNA.h5ad",
   split.by = "timepoint", levels = c("d60", "d110"), conda_env = "scverse"
 )
 
@@ -289,7 +289,7 @@ csr <- apply(data.frame(donor = c("368-07", "368-07", "368-20", "368-20"),
                         timepoint = c("d60", "d110", "d60", "d110"),
                         stringsAsFactors = FALSE), MARGIN = 1, function(x){
   timepoint <- as.character(x[2]); donor <- as.character(x[1])                        
-  filename <- paste0("WU368_kim_et_al_nature_2022_gex_b_cells_", donor,
+  filename <- paste0("Kim_Covid_Bcells_", donor,
                      "_GC_IGHC_assay-RNA_", timepoint, ".h5ad")
   g_csr <- fitTransitionModel(
     anndata_file = filename, conda_env = "scicsr", mode = "pseudotime", 

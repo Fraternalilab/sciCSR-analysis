@@ -10,7 +10,7 @@ library(sciCSR)
 # Stewart et al (peripheral blood B cells)
 
 ```{r}
-pure <- '/Volumes//Seagate4TB/GLT_datasets/scPure/scPure2_Pure1Integrated_noPC_IGHC_metacells.rds'
+pure <- '/Volumes/Seagate4TB/GLT_datasets/scPure/Stewart_HumanPeripheral_Bcells_atlas_IGHC.rds'
 pure <- readRDS(pure)
 pure <- subset(pure, subset = (orig.ident == "HB6"))
 
@@ -48,7 +48,7 @@ dev.off()
 
 # King et al tonsil dataset
 ```{r}
-king <- '/Volumes//Seagate4TB/GLT_datasets/King_Tonsil/SEURAT_OBJECTS/HumanTonsil_BCells_scRNA_IGHC_metacell_SeuratObject.rds'
+king <- '/Volumes//Seagate4TB/GLT_datasets/King_Tonsil/SEURAT_OBJECTS/King_HumanTonsil_Bcells_IGHC.rds'
 king <- readRDS(king)
 king <- subset(king, idents = c("Naive", "MBC", "Activated", "preGC", "LZ GC", "DZ GC", "prePB",
                                 "Plasmablast"))
@@ -212,12 +212,12 @@ dev.off()
 
 ```{r}
 # read Stewart et al & King et al atlas
-pure <- 'scPure2_Pure1Integrated_noPC_IGHC_metacells.rds'
+pure <- 'Stewart_HumanPeripheral_Bcells_IGHC.rds'
 pure <- readRDS(pure)
 pure <- subset(pure, subset = (orig.ident == "HB6")) # the original donor
 DefaultAssay(pure) <- 'integrated'
 
-king <- 'SEURAT_OBJECTS/HumanTonsil_BCells_scRNA_IGHC_metacell_SeuratObject.rds'
+king <- 'King_HumanTonsil_Bcells_IGHC.rds'
 king <- readRDS(king)
 
 pure <- NormalizeData(pure)
@@ -248,7 +248,7 @@ DimPlot(combined, label = TRUE)
 ```
 
 ```{r}
-saveRDS(combined, '/media/josefng/Seagate4TB/GLT_datasets/scPure-HB6_KingTonsil_integrated.rds')
+saveRDS(combined, '/media/josefng/Seagate4TB/GLT_datasets/human_Bcells_atlas_IGHC.rds')
 ```
 
 # Deriving CSR potential
@@ -258,7 +258,7 @@ One easy way to derive a score would be to decompose the productive/sterile coun
 The matrix decomposition was performed using nonnegative matrix factorization (NMF). Here a simple NMF decomposition into 2 signatures (i.e. rank = 2) were performed - the idea is oen should expect a naive signature (heavy weights for IgM productive/sterile) and a memory signature. The safest seems to be to use the naive signature (as memory can be biased towards any isotype depending on the datasets, both reference data (i.e. our atlases)) or new datasets from the user).
 
 ```{r}
-combined <- readRDS('scPure-HB6_KingTonsil_integrated.rds')
+combined <- readRDS('human_Bcells_atlas_IGHC.rds')
 ```
 
 ```{r}
@@ -273,11 +273,11 @@ normcounts[["stewart"]] <- normcounts[["stewart"]][!grepl("-C$", rownames(normco
 normcounts[["king"]] <- normcounts[["king"]][!grepl("-C$", rownames(normcounts[["king"]])), ]
 normcounts[["stewart"]] <- normcounts[["stewart"]][, colSums(normcounts[["stewart"]]) > 0]
 normcounts[["king"]] <- normcounts[["king"]][, colSums(normcounts[["king"]]) > 0]
-saveRDS(normcounts, "scPure-HB6_KingTonsil_IGHC_NormCounts.rds")
+saveRDS(normcounts, "human_Bcells_atlas_IGHC_NormCounts.rds")
 ```
 
 ```{r}
-normcounts <- readRDS("scPure-HB6_KingTonsil_IGHC_NormCounts.rds")
+normcounts <- readRDS("human_Bcells_atlas_IGHC_NormCounts.rds")
 ```
 
 ```{r}
@@ -292,7 +292,28 @@ test_nmf <-  nmf(normcounts, rank = 2:8, method = "snmf/r",
 ```{r}
 # final rank=2 nmf
 nmf <- nmf(normcounts, rank = 2, method = "snmf/r", nrun = 10, .options = "p2 v")
-saveRDS(nmf, "scPure-HB6_KingTonsil_IGHC_NMF-combined.rds")
+saveRDS(nmf, "human_Bcells_atls_IGHC_NMF_rank.rds")
+```
+
+```{r}
+# this is the signature matrix
+pheatmap::pheatmap( nmf@fit@W, cluster_rows = FALSE, cluster_cols = FALSE )
+
+# the first column is the naive signature
+
+# fit the coefficients of these two signature for each cell in the data
+# using nnls
+
+naive_signature <- sapply(Cells(combined),
+                          function(n) nnls::nnls(nmf@fit@W, combined@assays$IGHC@data[rownames(nmf@fit@W), n])$x[1])
+# scale into range [0, 1] and invert
+naive_signature <- (naive_signature - min(naive_signature)) / abs(diff(range(naive_signature)))
+naive_signature <- 1 - naive_signature
+combined <- AddMetaData(combined, naive_signature, col.name = "csr_score")
+
+ggplot(combined@meta.data, aes(x = csr_pot, y = csr_score)) + geom_point()
+
+FeaturePlot(combined, c("csr_pot", "csr_score"))
 ```
 
 ## Mouse
@@ -310,27 +331,5 @@ library(NMF)
 set.seed(1234)
 test <- normcounts[,sample(1:ncol(normcounts), 40000)]
 nmf <- nmf(test, rank = 2, method = "snmf/r", nrun = 10, .options = "p2 v")
-saveRDS(nmf, "scPure-HB6_KingTonsil_IGHC_NMF-combined.rds")
+saveRDS(nmf, "mouse_Bcells_atlas_IGHC_NMF_rank.rds")
 ```
-
-```{r}
-# this is the signature matrix
-pheatmap::pheatmap( nmf@fit@W, cluster_rows = FALSE, cluster_cols = FALSE )
-
-# the first column is the naive signature
-
-# fit the coefficients of these two signature for each cell in the data
-# using nnls
-
-naive_signature <- sapply(Cells(combined), 
-                          function(n) nnls::nnls(nmf@fit@W, combined@assays$IGHC@data[rownames(nmf@fit@W), n])$x[1])
-# scale into range [0, 1] and invert
-naive_signature <- (naive_signature - min(naive_signature)) / abs(diff(range(naive_signature)))
-naive_signature <- 1 - naive_signature
-combined <- AddMetaData(combined, naive_signature, col.name = "csr_score")
-
-ggplot(combined@meta.data, aes(x = csr_pot, y = csr_score)) + geom_point()
-
-FeaturePlot(combined, c("csr_pot", "csr_score"))
-```
-

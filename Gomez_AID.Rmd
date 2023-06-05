@@ -122,6 +122,29 @@ cowplot::plot_grid(
 
 ```
 
+```{r}
+gomez_dotplot <- list(
+    DotPlot(gomez[, which(gomez$genot == "KO")], group.by = "seurat_clusters",
+            features = genes, assay = "IGHC")$data,
+    DotPlot(gomez[, which(gomez$genot == "WT")], group.by = "seurat_clusters", 
+            features = genes, assay = "IGHC")$data 
+)
+gomez_dotplot[[1]]$genot <- "Aicda KO"
+gomez_dotplot[[2]]$genot <- "WT"
+gomez_dotplot <- do.call("rbind", gomez_dotplot)
+
+svg("gomez_dotplot.svg", width = 7, height = 4.4)
+ggplot(gomez_dotplot[gomez_dotplot$pct.exp > 0, ], 
+       aes(x = features.plot, y = interaction(genot, id, sep = " "), 
+           size = pct.exp, colour = log10(avg.exp + 1))) +
+  geom_point() + scale_color_viridis_c(name = "Average\nexpression") +
+  xlab("") + ylab("") + ggtitle("Gómez-Escolar et al") +
+  scale_size_continuous(name = "Percent\nexpressd", limits = c(0, 100)) +
+  cowplot::theme_cowplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+dev.off()
+```
+
 ```{r, eval=FALSE}
 saveRDS(gomez, "Gomez_AID.rds")
 ```

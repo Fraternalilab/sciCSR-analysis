@@ -408,6 +408,28 @@ Idents(hong) <- factor(Idents(hong), levels = c("LZ 1", "LZ 2", "DZ 1", "DZ 2",
 hong$clusters_named <- Idents(hong)
 ```
 
+```{r}
+hong_dotplot <- list(
+  DotPlot(hong[, which(hong$Status == "IL23-/-")], features = genes, assay = "IGHC")$data,
+  DotPlot(hong[, which(hong$Status == "WT")], features = genes, assay = "IGHC")$data
+)
+hong_dotplot[[1]]$Status <- "Il23-/-"
+hong_dotplot[[2]]$Status <- "WT"
+hong_dotplot <- do.call("rbind", hong_dotplot)
+
+svg("hong_dotplot.svg", width = 7, height = 4.8)
+ggplot(hong_dotplot[hong_dotplot$pct.exp > 0, ], 
+       aes(x = features.plot, y = interaction(Status, id, sep = " "),
+           size = scales::squish(pct.exp, range = c(10, 60)),
+           color = log10(avg.exp + 1))) +
+  geom_point() + scale_color_viridis_c(name = "Average\nexpression") +
+  ylab("") + xlab("") + ggtitle("Hong et al") +
+  scale_size_continuous(name = "Percent\nexpressed") + cowplot::theme_cowplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+dev.off()
+
+```
+
 Sample states from the Markov models defined using velocity/CSR/SHM
 
 ```{r}
