@@ -11,4 +11,4 @@ analysis scripts in the Ng et al. sciCSR paper.
 | `Kim_Covid_GLT.Rmd` | Code to analyse the SARS-CoV-2 vaccination time-course ([Kim et al. Nature 2022](https://www.nature.com/articles/s41586-022-04527-1)) data | Figure 5, Supplementary Figure S4, S8 |
 | `Gomez_AID.Rmd` | Code to analyse the Aicda mouse knockout ([Gómez-Escolar et al. EMBO Rep 2022](https://www.embopress.org/doi/full/10.15252/embr.202255000)) data | Figure 6a,b |
 | `Hong_IL23_GLT.Rmd` | Code to analyse the Il23 mouse knockout ([Hong et al. J Immunol 2020](https://doi.org/10.4049/jimmunol.2000280)) data | Figure 6a,c-f, Supplementary Figure S9 |
-
+| `simulated_transitions.Rmd` | Code to assess the effect of dataset size on sciCSR inference | Supplementary Note 1 | 
