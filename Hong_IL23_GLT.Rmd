@@ -534,42 +534,42 @@ svg("markovchain_traj_umap.svg", width = 7.5, height= 5.5)
 cowplot::plot_grid(
   DimPlot(wt) + geom_density_2d(
     data = wt_comparisons_traj$mc_1, aes(x = UMAP_1, y = UMAP_2), 
-    colour = "grey40", alpha = 0.6
+    colour = "grey40"
   ) + ggtitle("WT, RNA velocity") + 
     theme(legend.position = "none", axis.line = element_blank(),
           axis.ticks = element_blank(),
           axis.text = element_blank(), axis.title = element_blank()),
   DimPlot(wt) + geom_density_2d(
     data = wt_comparisons_traj$mc_2, aes(x = UMAP_1, y = UMAP_2), 
-    colour = "grey40", alpha = 0.6
+    colour = "grey40"
   ) + ggtitle("WT, CSR") + 
     theme(legend.position = "none", axis.line = element_blank(),
           axis.ticks = element_blank(),
           axis.text = element_blank(), axis.title = element_blank()),
   DimPlot(wt) + geom_density_2d(
     data = wt_comparisons_traj$mc_3, aes(x = UMAP_1, y = UMAP_2), 
-    colour = "grey40", alpha = 0.6
+    colour = "grey40"
   ) + ggtitle("WT, SHM") + 
     theme(legend.position = "none", axis.line = element_blank(),
           axis.ticks = element_blank(),
           axis.text = element_blank(), axis.title = element_blank()),
   DimPlot(ko) + geom_density_2d(
     data = ko_comparisons_traj$mc_1, aes(x = UMAP_1, y = UMAP_2), 
-    colour = "grey40", alpha = 0.6
+    colour = "grey40"
   ) + ggtitle("IL23-/-, RNA velocity") + 
     theme(legend.position = "none", axis.line = element_blank(),
           axis.ticks = element_blank(),
           axis.text = element_blank(), axis.title = element_blank()),
   DimPlot(ko) + geom_density_2d(
     data = ko_comparisons_traj$mc_2, aes(x = UMAP_1, y = UMAP_2), 
-    colour = "grey40", alpha = 0.6
+    colour = "grey40"
   ) + ggtitle("IL23-/-, CSR") + 
     theme(legend.position = "none", axis.line = element_blank(),
           axis.ticks = element_blank(),
           axis.text = element_blank(), axis.title = element_blank()),
   DimPlot(ko) + geom_density_2d(
     data = ko_comparisons_traj$mc_3, aes(x = UMAP_1, y = UMAP_2), 
-    colour = "grey40", alpha = 0.6
+    colour = "grey40"
   ) + ggtitle("IL23-/-, SHM") + 
     theme(legend.position = "none", axis.line = element_blank(),
           axis.ticks = element_blank(),
