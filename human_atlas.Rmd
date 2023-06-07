@@ -46,6 +46,33 @@ dev.off()
 
 ```
 
+CSR potential
+
+```{r}
+pure <- FindNeighbors(pure)
+pure <- getCSRpotential(pure, reference_based = "human")
+
+df <- FetchData(pure, c("UMAP_1", "UMAP_2", "csr_pot"))
+Idents(test) <- test$library_id
+
+library(ggplot2)
+pdf("Stewart_csr_pot.pdf", width = 17, height = 3.6)
+cowplot::plot_grid(
+  DimPlot(test, label = TRUE) + ggtitle("Stewart et al. Peripheral blood"),
+  ggplot(df, aes(x = UMAP_1, y = UMAP_2, color = csr_pot)) +
+    geom_point(data = df[which(df$csr_pot == 1), ], pch = ".") +
+    # ensure points of different CSR potential values are plotted on top
+    geom_point(data = df[which(df$csr_pot < 1), ], pch = ".") +
+    cowplot::theme_cowplot() +
+    scale_color_viridis_c(option = "C", name = "CSR\npotential"),
+  FeaturePlot(test, features = c("IGHG1-S")),
+  FeaturePlot(test, features = c("IGHA1-S")),
+  nrow = 1, axis = "tblr", align = "hv"
+)
+dev.off()
+
+```
+
 # King et al tonsil dataset
 ```{r}
 king <- '/Volumes//Seagate4TB/GLT_datasets/King_Tonsil/SEURAT_OBJECTS/King_HumanTonsil_Bcells_IGHC.rds'
@@ -56,6 +83,33 @@ Idents(king) <- factor(Idents(king), levels = c("Naive", "MBC", "Activated", "pr
                                                 "Plasmablast"))
 king$CellType <- factor(king$CellType, levels = c("Naive", "MBC", "Activated", "preGC", "LZ GC", "DZ GC", "prePB",
                                                   "Plasmablast"))
+```
+
+CSR potential
+
+```{r}
+king <- Seurat::FindNeighbors(king, assay = "integrated")
+king <- RunUMAP(king, dims = 1:9) # at least 1.5% variance explaind in each PC
+DefaultAssay(king) <- "integrated"
+king <- sciCSR::getCSRpotential(king, reference_based = "human")
+df <- FetchData(king, c("UMAP_1", "UMAP_2", "csr_pot"))
+
+library(ggplot2)
+pdf("King_csr_pot.pdf", width = 17, height = 3.6)
+cowplot::plot_grid(
+  DimPlot(test, label = TRUE) + ggtitle("King et al. Tonsils"),
+  ggplot(df, aes(x = UMAP_1, y = UMAP_2, color = csr_pot)) + 
+    geom_point(data = df[which(df$csr_pot == 1), ], pch = ".") + 
+    # ensure points of different CSR potential values are plotted on top
+    geom_point(data = df[which(df$csr_pot < 1), ], pch = ".") + 
+    cowplot::theme_cowplot() + 
+    scale_color_viridis_c(option = "C", name = "CSR\npotential"),
+  FeaturePlot(test, features = c("IGHG1-S")),
+  FeaturePlot(test, features = c("IGHA1-S")),
+  nrow = 1, axis = "tblr", align = "hv"
+)
+dev.off()
+
 ```
 
 # Sparsity of productive/sterile transcripts
@@ -251,7 +305,7 @@ DimPlot(combined, label = TRUE)
 saveRDS(combined, '/media/josefng/Seagate4TB/GLT_datasets/human_Bcells_atlas_IGHC.rds')
 ```
 
-# Deriving CSR potential
+# NMF to derive CSR potential
 
 One easy way to derive a score would be to decompose the productive/sterile count matrix for "isotype signatures" - one would expect a prominent signature being a naive like signature (i.e. IgM-dominated) - and then extract the weight (coefficient) associated with this signature for each cell. And then invert this such that naive cells have a small number. The signature matrix can be stored and decompose future samples (i.e. new datasets) using nonnegative least square (NNLS) regression.
 
@@ -310,10 +364,102 @@ naive_signature <- sapply(Cells(combined),
 naive_signature <- (naive_signature - min(naive_signature)) / abs(diff(range(naive_signature)))
 naive_signature <- 1 - naive_signature
 combined <- AddMetaData(combined, naive_signature, col.name = "csr_score")
+```
 
-ggplot(combined@meta.data, aes(x = csr_pot, y = csr_score)) + geom_point()
+### Check CSR potential against sterile/productive transcription levels
 
-FeaturePlot(combined, c("csr_pot", "csr_score"))
+```{r}
+pure <- AddMetaData(pure, FetchData(pure, "IGHM-P"), "IgM")
+pure <- AddMetaData(pure, rowSums(FetchData(pure, paste0(c("IGHG1", "IGHG2", "IGHG3",
+                                                           "IGHG4", "IGHA1", "IGHA2"), "-P"))), "IgG.A")
+pure <- AddMetaData(pure, rowSums(FetchData(pure, paste0(c("IGHG1", "IGHG2", "IGHG3",
+                                                           "IGHG4", "IGHA1", "IGHA2"), "-S"))), "IgG.A_sterile")
+
+king <- subset(king, subset = (CellType %in% c("Naive", "GC", "Plasmablast")))
+king <- FindNeighbors(king, assay = "integrated", return.neighbor = TRUE)
+DefaultAssay(king) <- "integrated"
+king <- getCSRpotential(king, reference_based = "human")
+king <- AddMetaData(king, FetchData(king, "IGHM-P"), "IgM")
+king <- AddMetaData(king, rowSums(FetchData(king, paste0(c("IGHG1", "IGHG2", "IGHG3",
+                                                           "IGHG4", "IGHA1", "IGHA2"), "-P"))), "IgG.A")
+king <- AddMetaData(king, rowSums(FetchData(king, paste0(c("IGHG1", "IGHG2", "IGHG3",
+                                                           "IGHG4", "IGHA1", "IGHA2"), "-S"))), "IgG.A_sterile")
+
+nmf <- readRDS("/media/josephn/Seagate4TB/GLT_datasets/scPure-HB6_KingTonsil_IGHC_NMF-combined.rds")
+nmf_weights <- nmf@fit@H[1, grepl("^[ACTG]", colnames(nmf@fit@H))]
+pure <- AddMetaData(pure, nmf_weights, col.name = "nmf_weights")
+nmf_weights <- nmf@fit@H[1, !grepl("^[ACTG]", colnames(nmf@fit@H))]
+king <- AddMetaData(king, nmf_weights, col.name = "nmf_weights")
+
+#------------------------------
+# plot CSR potential against sterile/productive isotype expression
+test <- FetchData(pure, c("nmf_weights", "library_id", "IgM", "IgG.A", "IgG.A_sterile"))
+test <- test[which(test$nmf_weights > 0), ]
+test <- test[which(test$library_id != "DN"), ]
+test <- list(test[, c("nmf_weights", "IgM")], test[, c("nmf_weights", "IgG.A")],
+             test[, c("nmf_weights", "IgG.A_sterile")])
+colnames(test[[1]]) <- c("nmf_weights", "expression")
+colnames(test[[2]]) <- c("nmf_weights", "expression")
+colnames(test[[3]]) <- c("nmf_weights", "expression")
+test[[1]]$isotype <- "IgM"; test[[2]]$isotype <- "IgG/A"; test[[3]]$isotype <- "IgG/A_sterile"
+test <- rbind(test[[1]], test[[2]], test[[3]])
+
+test2 <- FetchData(pure, c("library_id", "nmf_weights"))
+test2$library_id <- factor(test2$library_id,
+                           levels = c("Transitional", "Naive", "IgM_Memory",
+                                      "Classical_Memory", "DN"))
+test2 <- test2[which(test2$library_id != "DN"), ]
+
+library(ggplot2)
+svg("nmf_weights_scPure.svg", width = 4.8, height = 4.6)
+cowplot::plot_grid(
+  ggplot(test2[which(test2$nmf_weights > 0), ],
+         aes(x = nmf_weights, color = library_id)) +
+    geom_density(adjust = 3, size = 1) +
+    cowplot::theme_cowplot() + scale_x_reverse() +
+    scale_color_manual(values = viridis::inferno(4)[1:4]) +
+    geom_boxplot(aes(y = 0.8, fill = library_id), color = "grey", outlier.shape = NA,
+                 position = position_dodge2(width = 0.3), width = 0.3) +
+    scale_fill_manual(values = viridis::inferno(4)[1:4]) +
+    scale_y_continuous(breaks = c(0, 0.2, 0.4, 0.6), name = "density"),
+  ggplot(test, aes(x = nmf_weights, y = expression, color = isotype)) +
+    geom_smooth(method = "loess") + cowplot::theme_cowplot() + scale_x_reverse(),
+  align = "v", axis = "lr", ncol = 1
+)
+dev.off()
+
+#----------------------------------
+# plot the same for king et al GC
+test <- FetchData(king, c("nmf_weights", "CellType", "IgM", "IgG.A", "IgG.A_sterile"))
+test <- test[which(test$nmf_weights > 0), ]
+test <- list(test[, c("nmf_weights", "IgM")], test[, c("nmf_weights", "IgG.A")],
+             test[, c("nmf_weights", "IgG.A_sterile")])
+colnames(test[[1]]) <- c("nmf_weights", "expression")
+colnames(test[[2]]) <- c("nmf_weights", "expression")
+colnames(test[[3]]) <- c("nmf_weights", "expression")
+test[[1]]$isotype <- "IgM"; test[[2]]$isotype <- "IgG/A"; test[[3]]$isotype <- "IgG/A_sterile"
+test <- rbind(test[[1]], test[[2]], test[[3]])
+
+test2 <- FetchData(king, c("CellType", "nmf_weights"))
+
+library(ggplot2)
+svg("nmf_weights_king.svg", width = 4.8, height = 4.6)
+cowplot::plot_grid(
+  ggplot(test2[which(test2$nmf_weights > 0), ],
+         aes(x = nmf_weights, color = CellType)) +
+    geom_density(adjust = 3, size = 1) +
+    cowplot::theme_cowplot() + scale_x_reverse() +
+    scale_color_manual(values = viridis::inferno(3)) +
+    geom_boxplot(aes(y = 0.8, fill = CellType), color = "grey", outlier.shape = NA,
+                 position = position_dodge2(width = 0.3), width = 0.3) +
+    scale_fill_manual(values = viridis::inferno(3)) +
+    scale_y_continuous(breaks = c(0, 0.2, 0.4, 0.6), name = "density"),
+  ggplot(test, aes(x = nmf_weights, y = expression, color = isotype)) +
+    geom_smooth(method = "loess") + cowplot::theme_cowplot() + scale_x_reverse(),
+  align = "v", axis = "lr", ncol = 1
+)
+dev.off()
+
 ```
 
 ## Mouse
