@@ -46,7 +46,9 @@ dev.off()
 
 ```
 
-CSR potential
+## CSR potential
+
+plot UMAP, CSR potential scores as feature plot, along side sterile IgG1/A1 just to show we can visualise these at single-cell level.
 
 ```{r}
 pure <- FindNeighbors(pure)
@@ -97,14 +99,18 @@ df <- FetchData(king, c("UMAP_1", "UMAP_2", "csr_pot"))
 library(ggplot2)
 pdf("King_csr_pot.pdf", width = 17, height = 3.6)
 cowplot::plot_grid(
+  # UMAP
   DimPlot(test, label = TRUE) + ggtitle("King et al. Tonsils"),
+  # CSR potential feature plot (i.e. csr_pot = colour of the dots)
   ggplot(df, aes(x = UMAP_1, y = UMAP_2, color = csr_pot)) + 
     geom_point(data = df[which(df$csr_pot == 1), ], pch = ".") + 
     # ensure points of different CSR potential values are plotted on top
     geom_point(data = df[which(df$csr_pot < 1), ], pch = ".") + 
     cowplot::theme_cowplot() + 
     scale_color_viridis_c(option = "C", name = "CSR\npotential"),
+  # sterile IgG1 feature plot
   FeaturePlot(test, features = c("IGHG1-S")),
+  # sterile IgA1 feature plot
   FeaturePlot(test, features = c("IGHA1-S")),
   nrow = 1, axis = "tblr", align = "hv"
 )
