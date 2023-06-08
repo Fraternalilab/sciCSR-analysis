@@ -382,7 +382,7 @@ pure <- AddMetaData(pure, rowSums(FetchData(pure, paste0(c("IGHG1", "IGHG2", "IG
                                                            "IGHG4", "IGHA1", "IGHA2"), "-S"))), "IgG.A_sterile")
 
 king <- subset(king, subset = (CellType %in% c("Naive", "GC", "Plasmablast")))
-king <- FindNeighbors(king, assay = "integrated", return.neighbor = TRUE)
+king <- FindNeighbors(king, assay = "integrated")
 DefaultAssay(king) <- "integrated"
 king <- getCSRpotential(king, reference_based = "human")
 king <- AddMetaData(king, FetchData(king, "IGHM-P"), "IgM")

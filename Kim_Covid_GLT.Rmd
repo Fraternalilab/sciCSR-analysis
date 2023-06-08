@@ -471,6 +471,17 @@ ddply(rep_perc, c("donor"), summarise,
       cosine_w15_w29 = philentropy::cosine_dist(d110, d201, testNA=FALSE))
 ```
 
+```{r}
+# BCR distribution as bar plot (Fig 5b)
+ggplot(data = brep_count[which(brep_count$donor %in% c("368-07", "368-20") &
+                                 brep_count$gex_anno == "GC"), ],
+       aes(x = prop, y = subisotype, fill = timepoint)) +
+  geom_bar(stat = "identity", position = position_dodge2()) + 
+  scale_x_continuous(labels = scales::percent, name = "% BCR", limits = c(0, 0.6)) +
+  scale_fill_manual(values = RColorBrewer::brewer.pal(9, "Blues")[c(3, 5, 8)]) +
+  cowplot::theme_cowplot() + facet_wrap(~ donor, ncol = 1, scales = "free_x")
+```
+
 # effect of downsampling future states on inference
 
 ```{r}
@@ -626,6 +637,79 @@ cowplot::plot_grid(
     cowplot::theme_cowplot() + theme(axis.text.x = element_text(size = 10)),
     ncol = 2, rel_widths = c(1, 4), axis = "tb"
 )
+dev.off()
+```
+
+```{r}
+# just to plot the isotype distribution in the resampled data to show as
+# illustration of the sampling procedure
+
+# first read in the anndata files
+h5ad_files <- list.files(
+  path = "/media/josephn/Seagate4TB/GLT_datasets/KimEtAl_Covid",
+  pattern = "WU368_kim_et_al_nature_2022_gex_b_cells_368-.*_w7_GC_future-state-prop.*_assay-RNA.h5ad",
+  full.names = TRUE
+)
+
+library(reticulate)
+use_condaenv("scicsr", required = TRUE)
+py_run_string('import scanpy as sc')
+dists <- lapply(h5ad_files, function(file){
+  py_run_string(paste0("adata = sc.read_h5ad('", file, "')"))
+  py_run_string(paste0("cluster_ident = adata.obs.groupby('",
+                       'IGH_c_gene', "').indices"))
+  py_run_string("cluster_ident = {i: len(j) for i, j in cluster_ident.items()}")
+  return(py$cluster_ident)
+})
+dists <- sapply(dists, unlist)
+dists <- apply(dists, 2, function(x) x / sum(x))
+dists <- reshape2::melt(dists)
+dists[, 1] <- factor(dists[, 1], levels = c("M", "D", "G3", "G1", "A1",
+                                            "G2", "G4", "E", "A2"))
+dists[, "file"] <- factor(dists[, 2], labels = basename(h5ad_files))
+dists[, "donor"] <- sapply(dists[, "file"], function(x){
+  unlist(strsplit(as.character(x), split = "_"))[10]
+})
+dists[, "future_state_prop"] <- sapply(dists[, "file"], function(x){
+  o <- unlist(strsplit(as.character(x), split = "_"))[13]
+  gsub("future-state-prop", "", o)
+})
+
+# the original data
+dists2 <- lapply(c("/media/josephn/Seagate4TB/GLT_datasets/KimEtAl_Covid/WU368_kim_et_al_nature_2022_gex_b_cells_368-07_GC_IGHC_assay-RNA_d60.h5ad",
+                   "/media/josephn/Seagate4TB/GLT_datasets/KimEtAl_Covid/WU368_kim_et_al_nature_2022_gex_b_cells_368-20_GC_IGHC_assay-RNA_d60.h5ad"), function(file){
+  py_run_string(paste0("adata = sc.read_h5ad('", file, "')"))
+  py_run_string(paste0("cluster_ident = adata.obs.groupby('",
+                       'IGH_c_gene', "').indices"))
+  py_run_string("cluster_ident = {i: len(j) for i, j in cluster_ident.items()}")
+  return(py$cluster_ident)
+})
+dists2 <- sapply(dists2, unlist)
+dists2 <- apply(dists2, 2, function(x) x / sum(x))
+dists2 <- reshape2::melt(dists2)
+dists2[, 1] <- factor(dists2[, 1], levels = c("M", "D", "G3", "G1", "A1",
+                                              "G2", "G4", "E", "A2"))
+dists2[, "file"] <- factor(dists2[, 2], labels = c("368-07", "368-20"))
+dists2[, "donor"] <- factor(dists2[, 2], labels = c("368-07", "368-20"))
+dists2[, "future_state_prop"] <- "original"
+dists <- rbind(dists, dists2)
+dists[, "future_state_prop"] <- factor(dists[, "future_state_prop"],
+                                       levels = c("original",
+                                                  "0.3", "0.2", "0.1",
+                                                  "0.05", "0.01",
+                                                  "0.005"))
+
+library(ggplot2)
+svg("/Volumes/Seagate4TB/GLT_datasets/KimEtAl_Covid/csr_isotype_downsample_productive.svg",
+    width = 7, height = 4)
+ggplot(dists, aes(x = future_state_prop, y = value, fill = Var1)) +
+  geom_bar(stat = "identity", position = "fill") + cowplot::theme_cowplot() +
+  scale_fill_manual(values = c(RColorBrewer::brewer.pal(9, "Oranges")[c(2, 4, 7)],
+                               RColorBrewer::brewer.pal(9, "Blues")[c(7, 4, 2)]),
+                    name = "productive\nisotype") +
+  facet_grid(~ donor, scales = "free_x", space = "free_x") +
+  scale_y_continuous(name = "% cells", labels = scales::percent) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
 dev.off()
 ```
 
